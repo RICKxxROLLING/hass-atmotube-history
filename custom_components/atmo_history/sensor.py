@@ -13,13 +13,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import RESULTS, SIGNAL_UPDATED
+from .const import RESULTS, SIGNAL_STATUS, SIGNAL_UPDATED
 from .manager import AtmoHistoryConfigEntry, AtmoHistoryManager
 from .statistics import METRIC_META
 
@@ -105,6 +105,7 @@ async def async_setup_entry(
         [
             *(AtmoHistorySensor(manager, description) for description in SENSORS),
             *(AtmoHistoryValueSensor(manager, description) for description in HISTORY_SENSORS),
+            AtmoBatterySensor(manager),
         ]
     )
 
@@ -212,3 +213,41 @@ class AtmoHistorySensor(SensorEntity):
         if self.entity_description.attrs_fn is None:
             return None
         return self.entity_description.attrs_fn(self._manager)
+
+
+class AtmoBatterySensor(RestoreSensor):
+    """Battery level from the device's advertisements."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, manager: AtmoHistoryManager) -> None:
+        """Initialize."""
+        self._manager = manager
+        self._attr_unique_id = f"{manager.address}_battery"
+        self._attr_device_info = _device_info(manager)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last level and follow advertisements."""
+        if (last := await self.async_get_last_sensor_data()) is not None:
+            self._attr_native_value = last.native_value
+        self._handle_status()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_STATUS.format(self._manager.entry.entry_id),
+                self._handle_status,
+            )
+        )
+
+    @callback
+    def _handle_status(self) -> None:
+        if (status := self._manager.device_status) is None:
+            return
+        self._attr_native_value = status.battery
+        if self.hass is not None and self.entity_id:
+            self.async_write_ha_state()

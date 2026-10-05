@@ -31,6 +31,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import influx
+from .advertisement import AdvertisementStatus, parse_advertisement
 from .aggregate import (
     INTERVAL_GAP,
     INTERVAL_MATCH,
@@ -68,6 +69,7 @@ from .const import (
     RESULT_SUCCESS,
     RESULT_UNAVAILABLE,
     SESSION_TIMEOUT,
+    SIGNAL_STATUS,
     SIGNAL_UPDATED,
 )
 from .history import async_backfill_states
@@ -178,6 +180,8 @@ class AtmoHistoryManager:
         self._session_started: int | None = None
         self._session_resends = 0
         self._unsubs: list[Callable[[], None]] = []
+        # Battery and charging state from the latest advertisement
+        self.device_status: AdvertisementStatus | None = None
         # metric -> history value sensor, filled in by the sensor platform
         self.history_entities: dict[str, AtmoHistoryValueSensor] = {}
 
@@ -278,6 +282,11 @@ class AtmoHistoryManager:
         service_info: bluetooth.BluetoothServiceInfoBleak,
         change: bluetooth.BluetoothChange,
     ) -> None:
+        if (status := parse_advertisement(service_info.manufacturer_data)) is not None and (
+            status != self.device_status
+        ):
+            self.device_status = status
+            async_dispatcher_send(self.hass, SIGNAL_STATUS.format(self.entry.entry_id))
         now = monotonic()
         previous, self._last_seen = self._last_seen, now
         if self._blocked or self._lock.locked() or self._cancel_scheduled:

@@ -7,7 +7,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from bleak.backends.device import BLEDevice
@@ -190,7 +190,7 @@ async def test_interval_mismatch_stops_and_waits(hass: HomeAssistant, ble: Devic
     assert await hour_stats(hass, STAT_TEMP) == []
 
     # Blocked: advertisements no longer schedule syncs.
-    manager._async_on_advertisement(None, None)
+    manager._async_on_advertisement(MagicMock(), None)
     assert manager._cancel_scheduled is None
 
 

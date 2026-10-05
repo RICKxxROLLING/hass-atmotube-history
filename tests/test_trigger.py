@@ -11,6 +11,7 @@ import pytest
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothScanningMode
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -220,3 +221,25 @@ async def test_unload_cancels_pending_sync(
     assert await hass.config_entries.async_unload(manager.entry.entry_id)
     await advance(hass, clock, 60)
     mock_sync.assert_not_called()
+
+
+async def test_battery_and_charging_from_advertisements(
+    hass: HomeAssistant, registered: dict[str, Any], clock: Clock, mock_sync: AsyncMock
+) -> None:
+    await setup(hass)
+    info = MagicMock()
+    info.manufacturer_data = {0xFFFF: bytes.fromhex("005717ac381900018dbd484e")}  # 78 %, charging
+    registered["callback"](info, BluetoothChange.ADVERTISEMENT)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    battery = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_battery")
+    charging = registry.async_get_entity_id("binary_sensor", DOMAIN, f"{ADDRESS}_battery_charging")
+    assert hass.states.get(battery).state == "78"
+    assert hass.states.get(charging).state == "on"
+
+    info.manufacturer_data = {0xFFFF: bytes.fromhex("005717ac381900018dbd4064")}  # 100 %, not
+    registered["callback"](info, BluetoothChange.ADVERTISEMENT)
+    await hass.async_block_till_done()
+    assert hass.states.get(battery).state == "100"
+    assert hass.states.get(charging).state == "off"

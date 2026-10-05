@@ -21,7 +21,7 @@ from .const import (
 )
 from .manager import AtmoHistoryConfigEntry, AtmoHistoryManager
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 

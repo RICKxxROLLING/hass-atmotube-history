@@ -4,14 +4,16 @@ A Home Assistant custom integration that downloads the measurement history store
 **original Atmotube PRO** (not the PRO 2) over Bluetooth whenever it comes into range, and
 imports it with the original timestamps:
 
-- as **external long-term statistics** (hourly mean/min/max per metric), merged into hours that
-  already have data rather than overwriting them, and
+- as **history sensors** whose recorded history holds every minute record,
+- as **long-term statistics** (hourly mean/min/max per metric), merged into hours that already
+  have data rather than overwriting them, and
 - optionally as **raw per-record points in InfluxDB v2**.
 
-It only does history backfill. Live readings are left to
-[ha-atmo](https://github.com/natekspencer/ha-atmo) (`atmo`), and this integration creates no live
-sensors. Its diagnostic entities attach to the same device as ha-atmo's, because both identify the
-device by its Bluetooth address.
+While the device is in range it syncs every few minutes, so the history sensors stay close to
+live. Battery level and charging state come from the device's broadcasts. That makes
+[ha-atmo](https://github.com/natekspencer/ha-atmo) (`atmo`) optional: keep it if you want readings
+within seconds (e.g. for automations), or remove it. If both are installed, their entities share
+one device, because both identify it by its Bluetooth address.
 
 ## Requirements
 
@@ -179,6 +181,10 @@ existing row is weighted as if it covered the rest of the hour.
 **InfluxDB** gets a measurement `atmotube_history`, tagged `device=<MAC>`, with float fields
 `temperature humidity voc pressure pm1 pm25 pm10` at second precision. PM fields are left out
 when the sensor was off.
+
+**Battery and charging:** *Battery* (%) and *Charging* are read from the device's Bluetooth
+broadcasts, so they update whenever it is in range, without a connection. They keep their last
+value while the car is away.
 
 **Diagnostic sensors:**
 

@@ -53,3 +53,4 @@ RESULTS = [
 ISSUE_INTERVAL_MISMATCH = "interval_mismatch"
 
 SIGNAL_UPDATED = f"{DOMAIN}_updated_{{}}"
+SIGNAL_STATUS = f"{DOMAIN}_status_{{}}"

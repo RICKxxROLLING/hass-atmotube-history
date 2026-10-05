@@ -312,3 +312,16 @@ async def test_sync_now_service(hass: HomeAssistant, ble: DeviceHolder) -> None:
         await hass.services.async_call(
             DOMAIN, "sync_now", {"config_entry_id": entry.entry_id}, blocking=True
         )
+
+
+async def test_interval_confirmed_when_newest_batch_ends_now(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    first = int(time.time()) - 3 * 60
+    ble.device = FakeAtmotube([simple_batch(first, [10, 20, 30])])
+    entry = await setup_entry(hass)
+    manager = await sync(hass, entry)
+    assert manager.status.last_result == "success"
+    assert manager.interval_confirmed
+    assert manager.pending_batches == 0
+    assert manager.status.last_records == 3

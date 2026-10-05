@@ -18,10 +18,10 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.const import (
-    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    CONCENTRATION_PARTS_PER_BILLION,
     PERCENTAGE,
+    UnitOfDensity,
     UnitOfPressure,
+    UnitOfRatio,
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
@@ -39,11 +39,11 @@ _LOGGER = logging.getLogger(__name__)
 METRIC_META: dict[str, tuple[str, str, str | None]] = {
     "temperature": ("Temperature", UnitOfTemperature.CELSIUS, "temperature"),
     "humidity": ("Humidity", PERCENTAGE, None),
-    "voc": ("VOC", CONCENTRATION_PARTS_PER_BILLION, "unitless"),
+    "voc": ("VOC", UnitOfRatio.PARTS_PER_BILLION, "unitless"),
     "pressure": ("Pressure", UnitOfPressure.PA, "pressure"),
-    "pm1": ("PM1", CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, None),
-    "pm25": ("PM2.5", CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, None),
-    "pm10": ("PM10", CONCENTRATION_MICROGRAMS_PER_CUBIC_METER, None),
+    "pm1": ("PM1", UnitOfDensity.MICROGRAMS_PER_CUBIC_METER, None),
+    "pm25": ("PM2.5", UnitOfDensity.MICROGRAMS_PER_CUBIC_METER, None),
+    "pm10": ("PM10", UnitOfDensity.MICROGRAMS_PER_CUBIC_METER, None),
 }
 assert set(METRIC_META) == set(METRICS)
 

@@ -27,6 +27,7 @@ from .aggregate import (
     INTERVAL_GAP,
     INTERVAL_MATCH,
     HourlyAggregator,
+    batch_ends_at,
     classify_interval,
     measured_interval,
 )
@@ -119,9 +120,9 @@ class SyncStatus:
 def _batch_to_dict(batch: HistoryBatch) -> dict[str, Any]:
     return {
         "first_timestamp": batch.header.first_timestamp,
-        "packet_count": batch.header.packet_count,
+        "record_count": batch.header.record_count,
         "record_size": batch.header.record_size,
-        "packets": {str(n): p.hex() for n, p in batch.packets.items()},
+        "payload": batch.payload().hex(),
     }
 
 
@@ -129,12 +130,12 @@ def _batch_from_dict(data: dict[str, Any]) -> HistoryBatch:
     batch = HistoryBatch(
         HistoryHeader(
             first_timestamp=data["first_timestamp"],
-            packet_count=data["packet_count"],
+            record_count=data["record_count"],
             record_size=data["record_size"],
         )
     )
-    for number, payload in data["packets"].items():
-        batch.add(HistoryDataPacket(int(number), bytes.fromhex(payload)))
+    payload = bytes.fromhex(data["payload"])
+    batch.add(HistoryDataPacket(len(payload) // data["record_size"], payload))
     return batch
 
 
@@ -163,6 +164,7 @@ class AtmoHistoryManager:
         self._cancel_scheduled: CALLBACK_TYPE | None = None
         self._session_imported = 0
         self._session_decoded = 0
+        self._session_started: int | None = None
         self._unsubs: list[Callable[[], None]] = []
 
     # Options -----------------------------------------------------------
@@ -303,6 +305,7 @@ class AtmoHistoryManager:
         self.status.last_attempt = dt_util.utcnow()
         self._session_imported = 0
         self._session_decoded = 0
+        self._session_started = int(dt_util.utcnow().timestamp())
         dry_run = bool(self._opt(CONF_DRY_RUN, False))
 
         ble_device = bluetooth.async_ble_device_from_address(
@@ -387,16 +390,27 @@ class AtmoHistoryManager:
             records = batch.records(interval)
             self._session_decoded += len(records)
             _LOGGER.info(
-                "Dry run: batch at %s, %s packets of %s-byte records, %s records "
-                "(not acknowledged, nothing stored)",
+                "Dry run: batch at %s, %s records of %s bytes (not acknowledged, nothing stored)",
                 header.first_timestamp,
-                header.packet_count,
-                header.record_size,
                 len(records),
+                header.record_size,
             )
             for record in records:
                 _LOGGER.info("Dry run record: %s", record)
             return False
+
+        if (
+            not self.interval_confirmed
+            and self._session_started is not None
+            and batch_ends_at(
+                header.first_timestamp, batch.record_count, interval, self._session_started
+            )
+        ):
+            _LOGGER.info(
+                "Record interval of %s s confirmed: the newest batch ends at the sync time",
+                interval,
+            )
+            self._confirmed_interval = interval
 
         if self._last_batch:
             measured = measured_interval(

@@ -8,25 +8,28 @@ Flutter package):
 
 1. Write ``HST`` + uint32 Unix time. The device answers ``HOK``.
 2. If it has unsynced history it sends ``HT``:
-   ``"HT", 0x00, uint32 first-record time, uint8 packet count, uint8 record size``
-3. Then ``packet count`` ``HD`` packets:
-   ``"HD", 0x00, uint8 packet number, records...``
+   ``"HT", 0x00, uint32 first-record time, uint8 record count, uint8 record size``
+3. Then ``HD`` packets until that many records have arrived:
+   ``"HD", 0x00, uint8 running record total, records...``
+   Atmotube's article calls these "number of HD packets" and "packet number",
+   but a real capture (MTU-sized packets of 15 records each) shows a record
+   count and a running record total, e.g. HT count 37 then HD 15, 30, 37.
+   atmotuber's ``diff = packetNumber - previousPacketNumber`` agrees.
 4. After a complete batch, write ``HOK`` + uint32 Unix time. The device marks
    the batch as synced and sends the next ``HT`` if there is more.
    There is no end-of-history packet; silence means done.
 
 Things that are NOT documented by Atmotube and are handled defensively:
 
-* Timestamp byte order. atmotuber encodes/decodes it big-endian, while the
-  record fields are little-endian. ``TIMESTAMP_BYTEORDER`` holds the choice
-  and implausible header times abort the transfer without an ACK.
-* The interval between records (atmotuber assumes 60 s). The caller supplies
-  it and is expected to verify it from consecutive ``HT`` headers.
-* Records per ``HD`` packet. atmotuber reads one; we split each payload by
-  the record size from ``HT``.
-* Packet numbering base. atmotuber implies 1..N; 0..N-1 is also accepted.
-* Record size. The documented layout is 14 bytes, but atmotuber reports 16;
-  trailing bytes are kept in ``HistoryRecord.extra``.
+* Timestamp byte order: big-endian (atmotuber, confirmed by a capture whose
+  first-record time plus 37 x 60 s equalled the HST time). Record fields are
+  little-endian. Implausible header times abort the transfer without an ACK.
+* The interval between records (atmotuber and the capture: 60 s). The caller
+  supplies it and verifies it.
+* Record size: 16 on the wire; the documented 14-byte layout is followed by
+  two bytes kept in ``HistoryRecord.extra``.
+* "No reading" markers: 0x80 for temperature and humidity, 0xFFFF for VOC
+  and PM, 0xFFFFFFFF for pressure.
 """
 
 from __future__ import annotations
@@ -48,7 +51,10 @@ TIMESTAMP_BYTEORDER = "big"
 
 RECORD_STRUCT = struct.Struct("<bBHIHHH")
 RECORD_MIN_SIZE = RECORD_STRUCT.size  # 14
-PM_NOT_AVAILABLE = 0xFFFF
+TEMPERATURE_NOT_AVAILABLE = -128  # 0x80
+HUMIDITY_MAX = 100  # 0x80 seen when not available
+U16_NOT_AVAILABLE = 0xFFFF
+U32_NOT_AVAILABLE = 0xFFFFFFFF
 
 HT_LENGTH = 9
 HD_HEADER_LENGTH = 4
@@ -114,7 +120,7 @@ class HistoryHeader:
     """Parsed HT packet."""
 
     first_timestamp: int
-    packet_count: int
+    record_count: int
     record_size: int
 
 
@@ -122,7 +128,7 @@ class HistoryHeader:
 class HistoryDataPacket:
     """Parsed HD packet."""
 
-    number: int
+    total: int  # running record total including this packet
     payload: bytes
 
 
@@ -131,24 +137,20 @@ class HistoryRecord:
     """One decoded measurement."""
 
     timestamp: int
-    temperature: int  # °C
-    humidity: int  # %
-    voc: int  # ppb
-    pressure: int  # Pa (the device sends mbar * 100)
-    pm1: int | None  # µg/m³, None when the PM sensor was off
+    # None wherever the device stored a "no reading" marker.
+    temperature: int | None  # °C
+    humidity: int | None  # %
+    voc: int | None  # ppb
+    pressure: int | None  # Pa (the device sends mbar * 100)
+    pm1: int | None  # µg/m³
     pm25: int | None
     pm10: int | None
     extra: bytes = b""
 
     def values(self) -> dict[str, float]:
         """Return the metrics that have a value, keyed by metric name."""
-        out: dict[str, float] = {
-            "temperature": self.temperature,
-            "humidity": self.humidity,
-            "voc": self.voc,
-            "pressure": self.pressure,
-        }
-        for key in ("pm1", "pm25", "pm10"):
+        out: dict[str, float] = {}
+        for key in ("temperature", "humidity", "voc", "pressure", "pm1", "pm25", "pm10"):
             if (value := getattr(self, key)) is not None:
                 out[key] = value
         return out
@@ -160,7 +162,7 @@ def parse_ht(data: bytes) -> HistoryHeader:
         raise ProtocolError(f"Malformed HT packet: {data.hex()}")
     header = HistoryHeader(
         first_timestamp=decode_timestamp(data[3:7]),
-        packet_count=data[7],
+        record_count=data[7],
         record_size=data[8],
     )
     if header.record_size < RECORD_MIN_SIZE:
@@ -175,7 +177,7 @@ def parse_hd(data: bytes) -> HistoryDataPacket:
     """Parse an HD packet."""
     if len(data) < HD_HEADER_LENGTH or not data.startswith(b"HD"):
         raise ProtocolError(f"Malformed HD packet: {data.hex()}")
-    return HistoryDataPacket(number=data[3], payload=bytes(data[4:]))
+    return HistoryDataPacket(total=data[3], payload=bytes(data[4:]))
 
 
 def check_timestamp_plausible(timestamp: int, now: int) -> None:
@@ -200,15 +202,19 @@ def check_timestamp_plausible(timestamp: int, now: int) -> None:
 def decode_record(chunk: bytes, timestamp: int) -> HistoryRecord:
     """Decode one record. ``chunk`` may be longer than the known layout."""
     temp, hum, voc, pressure, pm1, pm25, pm10 = RECORD_STRUCT.unpack_from(chunk)
+
+    def u16(value: int) -> int | None:
+        return None if value == U16_NOT_AVAILABLE else value
+
     return HistoryRecord(
         timestamp=timestamp,
-        temperature=temp,
-        humidity=hum,
-        voc=voc,
-        pressure=pressure,
-        pm1=None if pm1 == PM_NOT_AVAILABLE else pm1,
-        pm25=None if pm25 == PM_NOT_AVAILABLE else pm25,
-        pm10=None if pm10 == PM_NOT_AVAILABLE else pm10,
+        temperature=None if temp == TEMPERATURE_NOT_AVAILABLE else temp,
+        humidity=None if hum > HUMIDITY_MAX else hum,
+        voc=u16(voc),
+        pressure=None if pressure == U32_NOT_AVAILABLE else pressure,
+        pm1=u16(pm1),
+        pm25=u16(pm25),
+        pm10=u16(pm10),
         extra=bytes(chunk[RECORD_MIN_SIZE:]),
     )
 
@@ -218,46 +224,39 @@ class HistoryBatch:
     """One HT header plus its HD packets."""
 
     header: HistoryHeader
-    packets: dict[int, bytes] = field(default_factory=dict)
+    packets: list[bytes] = field(default_factory=list)
+    record_count: int = 0
 
     def add(self, packet: HistoryDataPacket) -> None:
         """Add an HD packet, rejecting anything inconsistent."""
-        if packet.number in self.packets:
-            raise ProtocolError(f"Duplicate HD packet number {packet.number}")
-        if packet.number > self.header.packet_count:
+        size = self.header.record_size
+        if len(packet.payload) % size:
             raise ProtocolError(
-                f"HD packet number {packet.number} exceeds the "
-                f"{self.header.packet_count} announced in HT"
+                f"HD payload of {len(packet.payload)} bytes is not a multiple "
+                f"of the record size {size}"
             )
-        if len(packet.payload) % self.header.record_size:
+        expected = self.record_count + len(packet.payload) // size
+        if packet.total != expected:
             raise ProtocolError(
-                f"HD packet {packet.number} payload of {len(packet.payload)} "
-                f"bytes is not a multiple of the record size "
-                f"{self.header.record_size}"
+                f"HD running total {packet.total} does not match the "
+                f"{expected} records received (packet lost or repeated)"
             )
-        self.packets[packet.number] = packet.payload
+        if expected > self.header.record_count:
+            raise ProtocolError(
+                f"HD running total {expected} exceeds the "
+                f"{self.header.record_count} records announced in HT"
+            )
+        self.packets.append(packet.payload)
+        self.record_count = expected
 
     @property
     def complete(self) -> bool:
-        """Return True once every announced packet has arrived."""
-        count = self.header.packet_count
-        if len(self.packets) < count:
-            return False
-        numbers = set(self.packets)
-        if numbers in (set(range(1, count + 1)), set(range(count))):
-            return True
-        raise ProtocolError(
-            f"HD packet numbers {sorted(numbers)} do not form a 0- or 1-based sequence of {count}"
-        )
-
-    @property
-    def record_count(self) -> int:
-        """Number of records received so far."""
-        return sum(len(p) for p in self.packets.values()) // self.header.record_size
+        """Return True once every announced record has arrived."""
+        return self.record_count == self.header.record_count
 
     def payload(self) -> bytes:
-        """Concatenate packet payloads in packet-number order."""
-        return b"".join(self.packets[n] for n in sorted(self.packets))
+        """Concatenate packet payloads in arrival order."""
+        return b"".join(self.packets)
 
     def records(self, interval: int) -> list[HistoryRecord]:
         """Decode all records, timestamped ``interval`` seconds apart."""
@@ -341,8 +340,7 @@ async def run_history_transfer(
         except TimeoutError:
             if batch is not None:
                 raise TransferIncomplete(
-                    f"Timed out after {len(batch.packets)} of "
-                    f"{batch.header.packet_count} HD packets"
+                    f"Timed out after {batch.record_count} of {batch.header.record_count} records"
                 ) from None
             if not got_reply:
                 raise NoResponse("No reply to HST") from None
@@ -358,14 +356,14 @@ async def run_history_transfer(
             got_reply = True
             if batch is not None:
                 raise TransferIncomplete(
-                    f"New HT after {len(batch.packets)} of {batch.header.packet_count} HD packets"
+                    f"New HT after {batch.record_count} of {batch.header.record_count} records"
                 )
             header = parse_ht(data)
             check_timestamp_plausible(header.first_timestamp, now())
             _LOGGER.debug(
-                "HT: first=%s packets=%s record_size=%s",
+                "HT: first=%s records=%s record_size=%s",
                 header.first_timestamp,
-                header.packet_count,
+                header.record_count,
                 header.record_size,
             )
             batch = HistoryBatch(header)

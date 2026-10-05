@@ -72,16 +72,20 @@ leaves some details out. This is how the integration handles each one:
 
 | Detail | What the integration does | Source |
 |---|---|---|
-| Timestamp byte order (`HST`/`HOK`/`HT`) | Big-endian. Record fields are little-endian. | [atmotuber](https://github.com/AtzeniMichele/atmotuber) `utils.dart`. Atmotube's Android library has no history code. |
-| Interval between records | 60 s by default, **checked automatically** (see below) | atmotuber's comment: "Check csv value: yes every one minute" |
-| Record size | Reads the 14 documented bytes and ignores the rest (atmotuber reports 16) | atmotuber |
-| Records per `HD` packet | Splits each packet by the record size from `HT` | — |
-| Packet numbering | Accepts 1..N (atmotuber) or 0..N-1 | atmotuber |
-| PM value `0xFFFF` | Treated as "PM sensor off" and skipped | Both Atmotube's Android library and atmotuber |
+| Timestamp byte order (`HST`/`HOK`/`HT`) | Big-endian. Record fields are little-endian. | [atmotuber](https://github.com/AtzeniMichele/atmotuber) `utils.dart`, confirmed by a real capture |
+| Interval between records | 60 s by default, **checked automatically** (see below) | atmotuber, and a real capture (37 records ending exactly at the sync time) |
+| `HT` count and `HD` number bytes | A **record** count and a **running record total**, not packet counts. Over a proxy each `HD` carries up to 15 records (e.g. `HT` 37, then `HD` 15, 30, 37). | Real capture. atmotuber's `diff` logic agrees. |
+| Record size | 16 bytes: the 14 documented bytes, then 2 unknown bytes (always 0 so far) | atmotuber and a real capture |
+| "No reading" markers | `0x80` temperature/humidity, `0xFFFF` VOC/PM, `0xFFFFFFFF` pressure: skipped | Real capture (the pressure marker is assumed by analogy); Atmotube's Android library for PM |
 
-**Interval check.** The interval is never assumed. The gap between two consecutive `HT` headers,
-divided by the number of records in the first batch, gives the real spacing between records.
-Until that has matched the configured interval once:
+**Interval check.** The interval is never assumed. It is confirmed in either of two ways:
+
+- the newest batch, spaced at the configured interval, ends at the time of the sync (the device
+  records continuously, so its next record is due then), or
+- the gap between two consecutive `HT` headers, divided by the number of records in the first
+  batch, matches it.
+
+Until one of those has matched once:
 
 - downloaded batches are **kept as raw bytes in Home Assistant's storage and acknowledged**, but
   not imported, and

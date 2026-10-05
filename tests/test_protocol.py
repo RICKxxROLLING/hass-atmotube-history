@@ -52,7 +52,7 @@ def test_commands_big_endian_timestamp() -> None:
 
 def test_parse_ht() -> None:
     header = parse_ht(ht(T0, 12, 16))
-    assert (header.first_timestamp, header.packet_count, header.record_size) == (T0, 12, 16)
+    assert (header.first_timestamp, header.record_count, header.record_size) == (T0, 12, 16)
 
 
 @pytest.mark.parametrize("data", [b"HT\x00\x01", b"XX\x00\x00\x00\x00\x00\x01\x10"])
@@ -68,7 +68,7 @@ def test_parse_ht_record_size_too_small() -> None:
 
 def test_parse_hd() -> None:
     packet = parse_hd(hd(7, record()))
-    assert packet.number == 7
+    assert packet.total == 7
     assert len(packet.payload) == 16
     with pytest.raises(ProtocolError):
         parse_hd(b"HD\x00")
@@ -91,6 +91,12 @@ def test_decode_record_pm_off() -> None:
     assert set(rec.values()) == {"temperature", "humidity", "voc", "pressure"}
 
 
+def test_decode_record_no_reading_markers() -> None:
+    rec = decode_record(b"\x80\x80\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00", 0)
+    assert rec.temperature is rec.humidity is rec.voc is rec.pressure is None
+    assert rec.values() == {}
+
+
 def test_decode_record_14_bytes() -> None:
     rec = decode_record(record(pad=b""), 0)
     assert rec.extra == b""
@@ -109,23 +115,16 @@ async def test_single_batch() -> None:
     assert [r.temperature for r in records] == [20, 21, 22]
 
 
-async def test_multi_record_packets_out_of_order() -> None:
+async def test_multi_record_packets() -> None:
     packets = [
-        ht(T0, 2, 16),
-        hd(2, record(temp=3), record(temp=4)),
-        hd(1, record(temp=1), record(temp=2)),
+        ht(T0, 4, 16),
+        hd(2, record(temp=1), record(temp=2)),
+        hd(4, record(temp=3), record(temp=4)),
     ]
     handler = Collector()
     result = await run_history_transfer(FakeAtmotube([packets]), handler, now)
     assert result.records_acked == 4
     assert [r.temperature for r in handler.batches[0].records(60)] == [1, 2, 3, 4]
-
-
-async def test_zero_based_numbering() -> None:
-    packets = [ht(T0, 2), hd(0, record(temp=1)), hd(1, record(temp=2))]
-    handler = Collector()
-    await run_history_transfer(FakeAtmotube([packets]), handler, now)
-    assert [r.temperature for r in handler.batches[0].records(60)] == [1, 2]
 
 
 async def test_multiple_batches_loop_until_silence() -> None:
@@ -221,10 +220,10 @@ async def test_hd_before_ht_ignored() -> None:
 @pytest.mark.parametrize(
     ("packets", "match"),
     [
-        ([ht(T0, 2), hd(1, record()), hd(1, record())], "Duplicate"),
-        ([ht(T0, 2), hd(3, record())], "exceeds"),
+        ([ht(T0, 2), hd(1, record()), hd(1, record())], "does not match"),
+        ([ht(T0, 3), hd(1, record()), hd(3, record())], "does not match"),
+        ([ht(T0, 2), hd(3, record(), record(), record())], "exceeds"),
         ([ht(T0, 1), hd(1, record() + b"\x00")], "multiple"),
-        ([ht(T0, 2), hd(0, record()), hd(2, record())], "sequence"),
     ],
 )
 async def test_inconsistent_packets(packets: list[bytes], match: str) -> None:
@@ -266,3 +265,59 @@ def test_pure_modules_have_no_ha_or_bleak_imports(module: str) -> None:
     assert not [
         n for n in names if n.split(".")[0] in ("homeassistant", "bleak", "bleak_retry_connector")
     ]
+
+
+# Captured from a real Atmotube PRO through an ESPHome proxy (2026-10-05).
+CAPTURE_HST_TIME = 0x6AC3C645
+CAPTURE = [
+    bytes.fromhex("4854006ac3bd992510"),
+    bytes.fromhex(
+        "4844000f8080ffff618e010001000100030000008080ffff5c8e010001000100020000008080"
+        "ffff5a8e010001000100020000008080ffff578e010001000100020000008080ffff5a8e0100"
+        "010001000200000080800700598e0100010001000200000080800d00538e01000100010002000000"
+        "80801100518e0100010001000200000080801500508e01000100010002000000808017004e8e0100"
+        "0100010003000000808019004a8e0100010002000300000080801a00478e01000100030004000000"
+        "80801a00458e0100020003000500000080801900468e01000100030005000000808017004a8e0100"
+        "0100030005000000"
+    ),
+    bytes.fromhex(
+        "4844001e808015004e8e0100010003000400000080801400538e0100010003000400000080801300"
+        "528e0100010002000400000080801200508e0100010002000400000080801100528e010001000300"
+        "0400000080801000508e0100010002000400000080800f004c8e0100010002000400000080800e00"
+        "4c8e0100010002000400000080800d00498e0100010002000300000080800c00478e010001000200"
+        "0300000080800b00478e0100010002000300000080800a004a8e0100010002000300000080800900"
+        "498e0100010002000300000080800800488e01000100020003000000808007004b8e010001000200"
+        "03000000"
+    ),
+    bytes.fromhex(
+        "4844002580800600478e0100010001000300000080800500448e0100010001000300000080800400"
+        "478e0100010002000300000080800300488e0100010002000300000080800200488e010001000200"
+        "0300000080800100438e01000100010003000000808001003e8e01000100010003000000"
+    ),
+]
+
+
+async def test_real_capture() -> None:
+    device = FakeAtmotube([CAPTURE])
+    handler = Collector()
+    result = await run_history_transfer(device, handler, lambda: CAPTURE_HST_TIME)
+    assert result.records_acked == 37
+    assert device.acks == 1
+
+    header = handler.batches[0].header
+    assert (header.first_timestamp, header.record_count, header.record_size) == (
+        1791212953,
+        37,
+        16,
+    )
+    # 37 records at 60 s end exactly at the HST time.
+    assert header.first_timestamp + 37 * 60 == CAPTURE_HST_TIME
+
+    records = handler.batches[0].records(60)
+    first, last = records[0], records[-1]
+    assert first.temperature is None and first.humidity is None  # 0x80 markers
+    assert first.voc is None  # 0xFFFF while the VOC sensor had no reading
+    assert (first.pressure, first.pm1, first.pm25, first.pm10) == (101985, 1, 1, 3)
+    assert first.extra == b"\x00\x00"
+    assert records[5].voc == 7
+    assert (last.timestamp, last.voc, last.pressure) == (1791212953 + 36 * 60, 1, 101950)

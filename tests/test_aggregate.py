@@ -10,6 +10,7 @@ from custom_components.atmo_history.aggregate import (
     INTERVAL_MISMATCH,
     HourlyAggregator,
     HourStats,
+    batch_ends_at,
     classify_interval,
     hour_start,
     measured_interval,
@@ -100,3 +101,11 @@ def test_measured_interval() -> None:
 )
 def test_classify_interval(measured: float, confirmed: bool, verdict: str) -> None:
     assert classify_interval(measured, 60, confirmed) == verdict
+
+
+def test_batch_ends_at() -> None:
+    assert batch_ends_at(H, 37, 60, H + 37 * 60)
+    assert batch_ends_at(H, 37, 60, H + 37 * 60 + 59)
+    assert not batch_ends_at(H, 37, 120, H + 37 * 60)
+    assert not batch_ends_at(H, 37, 30, H + 37 * 60)
+    assert not batch_ends_at(H, 0, 60, H)

@@ -173,3 +173,13 @@ def classify_interval(measured: float, configured: int, confirmed: bool) -> str:
     if confirmed and measured > configured:
         return INTERVAL_GAP
     return INTERVAL_MISMATCH
+
+
+def batch_ends_at(first: int, count: int, interval: int, now: int) -> bool:
+    """Return True if a batch's spacing puts its end at ``now``.
+
+    The device records continuously, so when the newest batch is downloaded
+    its next record is due within one interval of the sync time. This only
+    ever confirms an interval; a miss can just mean older data.
+    """
+    return count > 0 and abs(first + count * interval - now) <= interval

@@ -28,7 +28,9 @@ def to_line_protocol(address: str, records: Iterable[HistoryRecord]) -> list[str
     tag = _escape_tag(address)
     lines = []
     for record in records:
-        fields = ",".join(f"{k}={float(v)}" for k, v in record.values().items())
+        if not (values := record.values()):
+            continue
+        fields = ",".join(f"{k}={float(v)}" for k, v in values.items())
         lines.append(f"{MEASUREMENT},device={tag} {fields} {record.timestamp}")
     return lines
 

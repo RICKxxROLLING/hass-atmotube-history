@@ -34,11 +34,11 @@ from . import influx
 from .aggregate import (
     INTERVAL_GAP,
     INTERVAL_MATCH,
+    INTERVAL_MISMATCH,
     HourlyAggregator,
     batch_ends_at,
-    classify_interval,
+    check_continuity,
     is_resend,
-    measured_interval,
 )
 from .ble import async_download_history
 from .const import (
@@ -470,7 +470,7 @@ class AtmoHistoryManager:
                 _LOGGER.warning("Device keeps re-sending the same records; stopping")
                 return False
         else:
-            self._check_interval(batch)
+            first = self._check_interval(batch)
 
         if batch.record_count > skip:
             self._pending.append(
@@ -494,8 +494,12 @@ class AtmoHistoryManager:
         await self._async_save_sync_state()
         return True
 
-    def _check_interval(self, batch: HistoryBatch) -> None:
-        """Confirm the record interval, or raise IntervalMismatch."""
+    def _check_interval(self, batch: HistoryBatch) -> int:
+        """Check the batch continues the previous one; return its start time.
+
+        Confirms the record interval when it can, and raises IntervalMismatch
+        when the batch would overlap earlier records or cannot be explained.
+        """
         header = batch.header
         interval = self.interval
         if (
@@ -511,25 +515,29 @@ class AtmoHistoryManager:
             )
             self._confirmed_interval = interval
 
+        first = header.first_timestamp
         if not self._last_batch:
-            return
-        measured = measured_interval(
-            self._last_batch["first_timestamp"],
-            self._last_batch["record_count"],
-            header.first_timestamp,
+            return first
+        prev_first = self._last_batch["first_timestamp"]
+        prev_count = self._last_batch["record_count"]
+        verdict, anchored = check_continuity(
+            prev_first, prev_count, first, interval, self.interval_confirmed
         )
-        if measured is None:
-            return
-        verdict = classify_interval(measured, interval, self.interval_confirmed)
-        if verdict == INTERVAL_MATCH and not self.interval_confirmed:
-            _LOGGER.info("Record interval of %s s confirmed", interval)
-            self._confirmed_interval = interval
-        elif verdict == INTERVAL_GAP:
+        if verdict == INTERVAL_MATCH:
+            if not self.interval_confirmed:
+                _LOGGER.info("Record interval of %s s confirmed", interval)
+                self._confirmed_interval = interval
+            return anchored
+        if verdict == INTERVAL_GAP:
             _LOGGER.info(
-                "Recording gap before %s (spacing %.1f s)", header.first_timestamp, measured
+                "Recording gap of %s s before %s",
+                first - (prev_first + prev_count * interval),
+                first,
             )
-        elif verdict != INTERVAL_MATCH:
-            raise IntervalMismatch(measured, interval)
+            return first
+        if verdict == INTERVAL_MISMATCH:
+            raise IntervalMismatch((first - prev_first) / prev_count, interval)
+        return anchored
 
     async def _async_import_pending_locked(self) -> None:
         async with self._lock:

@@ -155,24 +155,40 @@ def measured_interval(previous_first: int, previous_count: int, next_first: int)
 
 
 INTERVAL_TOLERANCE = 2.0  # seconds
+# Fewest records in the previous batch for a header gap to confirm an interval.
+MIN_RECORDS_TO_CONFIRM = 10
 
 INTERVAL_MATCH = "match"
 INTERVAL_GAP = "gap"
 INTERVAL_MISMATCH = "mismatch"
+INTERVAL_UNDECIDED = "undecided"
 
 
-def classify_interval(measured: float, configured: int, confirmed: bool) -> str:
-    """Compare a measured interval to the configured one.
+def check_continuity(
+    prev_first: int, prev_count: int, new_first: int, interval: int, confirmed: bool
+) -> tuple[str, int]:
+    """Compare a new batch's start with where the previous batch ended.
 
-    Before the interval is confirmed, anything but a match is a mismatch.
-    Afterwards a longer spacing is a recording gap (e.g. the device was off),
-    while a shorter one means records would overlap and is a mismatch.
+    The device back-dates each batch from the time we send, so a batch's
+    start is only accurate to about one interval. A start within that much of
+    the previous batch's end continues it, and is moved onto the same grid so
+    timestamps stay evenly spaced. Returns the verdict and the start to use.
     """
-    if abs(measured - configured) <= INTERVAL_TOLERANCE:
-        return INTERVAL_MATCH
-    if confirmed and measured > configured:
-        return INTERVAL_GAP
-    return INTERVAL_MISMATCH
+    expected = prev_first + prev_count * interval
+    deviation = new_first - expected
+    slack = interval + INTERVAL_TOLERANCE
+    enough = prev_count >= MIN_RECORDS_TO_CONFIRM
+    if abs(deviation) <= slack:
+        if confirmed or enough:
+            return INTERVAL_MATCH, expected
+        return INTERVAL_UNDECIDED, expected
+    if deviation > slack:
+        # Later than expected: a recording gap once the interval is known.
+        if confirmed:
+            return INTERVAL_GAP, new_first
+        return (INTERVAL_MISMATCH if enough else INTERVAL_UNDECIDED), new_first
+    # Earlier than the previous batch's end: records would overlap.
+    return INTERVAL_MISMATCH, new_first
 
 
 def batch_ends_at(first: int, count: int, interval: int, now: int) -> bool:

@@ -8,13 +8,13 @@ from custom_components.atmo_history.aggregate import (
     INTERVAL_GAP,
     INTERVAL_MATCH,
     INTERVAL_MISMATCH,
+    INTERVAL_UNDECIDED,
     HourlyAggregator,
     HourStats,
     batch_ends_at,
-    classify_interval,
+    check_continuity,
     hour_start,
     is_resend,
-    measured_interval,
 )
 from custom_components.atmo_history.protocol import HistoryRecord
 
@@ -84,24 +84,27 @@ def test_seed_from_database() -> None:
     assert agg.stats(H)["temperature"] == HourStats(15, 5, 30)
 
 
-def test_measured_interval() -> None:
-    assert measured_interval(H, 10, H + 600) == 60
-    assert measured_interval(H, 0, H + 600) is None
-
-
 @pytest.mark.parametrize(
-    ("measured", "confirmed", "verdict"),
+    ("new_first", "prev_count", "confirmed", "verdict", "start"),
     [
-        (60.0, False, INTERVAL_MATCH),
-        (61.5, True, INTERVAL_MATCH),
-        (300.0, False, INTERVAL_MISMATCH),
-        (300.0, True, INTERVAL_GAP),
-        (30.0, True, INTERVAL_MISMATCH),
-        (-60.0, True, INTERVAL_MISMATCH),
+        # Continues the previous batch exactly.
+        (H + 600, 10, False, INTERVAL_MATCH, H + 600),
+        # Back-dating jitter of up to one interval is re-anchored onto the grid.
+        (H + 300 - 53, 5, True, INTERVAL_MATCH, H + 300),
+        (H + 300 + 40, 5, True, INTERVAL_MATCH, H + 300),
+        # Too few records to confirm an unconfirmed interval.
+        (H + 300 - 53, 5, False, INTERVAL_UNDECIDED, H + 300),
+        # A real gap once the interval is known.
+        (H + 600 + 3600, 10, True, INTERVAL_GAP, H + 600 + 3600),
+        (H + 600 + 3600, 10, False, INTERVAL_MISMATCH, H + 600 + 3600),
+        # Starts well before the previous batch ended: overlap.
+        (H + 300, 10, True, INTERVAL_MISMATCH, H + 300),
     ],
 )
-def test_classify_interval(measured: float, confirmed: bool, verdict: str) -> None:
-    assert classify_interval(measured, 60, confirmed) == verdict
+def test_check_continuity(
+    new_first: int, prev_count: int, confirmed: bool, verdict: str, start: int
+) -> None:
+    assert check_continuity(H, prev_count, new_first, 60, confirmed) == (verdict, start)
 
 
 def test_batch_ends_at() -> None:

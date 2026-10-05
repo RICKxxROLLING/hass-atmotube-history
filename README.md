@@ -86,24 +86,25 @@ leaves some details out. This is how the integration handles each one:
 | Acknowledgement window | About 5 s after the last `HD`; after that the device sends the batch again | Real capture |
 | "No reading" markers | `0x80` temperature/humidity, `0xFFFF` VOC/PM, `0xFFFFFFFF` pressure: skipped | Real capture (the pressure marker is assumed by analogy); Atmotube's Android library for PM |
 
-**Interval check.** The interval is never assumed. It is confirmed in either of two ways:
+**Interval check.** The interval is never assumed. The device works out each batch's start by
+counting back from the time Home Assistant sends when the sync starts, so a start time is only
+accurate to about one interval. The interval is confirmed in either of two ways:
 
-- the newest batch, spaced at the configured interval, ends at the time of the sync (the device
-  records continuously, so its next record is due then), or
-- the gap between two consecutive `HT` headers, divided by the number of records in the first
-  batch, matches it.
+- the newest batch, spaced at the configured interval, ends at the time of the sync, or
+- a batch of at least 10 records is followed by one that starts within one interval of where it
+  ended.
 
-Until one of those has matched once:
+Until one of those has matched once, downloaded batches are **kept as raw bytes in Home
+Assistant's storage and acknowledged**, but not imported. Once a match is seen, everything held
+is imported.
 
-- downloaded batches are **kept as raw bytes in Home Assistant's storage and acknowledged**, but
-  not imported, and
-- once a match is seen, everything held is imported.
-
-If the measured interval doesn't match, the sync **stops without acknowledging** and a repair
-issue explains what to do. Either set *Seconds between history records* to the measured value,
-or tick *I have verified the record interval* if the difference was a recording gap (the device
-was switched off). Once the interval is confirmed, a larger spacing is logged as a gap, and a
-smaller one stops the sync.
+A batch that starts within one interval of where the previous one ended continues it, and is
+shifted onto the same minute grid so the timestamps stay evenly spaced. A batch that starts
+later than that is a recording gap (the device was off). If a batch would **overlap** earlier
+records, or (before confirmation) cannot be explained, the sync **stops without acknowledging**
+and a repair issue explains what to do. Either set *Seconds between history records* to the
+right value, or tick *I have verified the record interval* if the difference was a recording
+gap.
 
 A first-record time before 2016 or in the future aborts the batch without acknowledging it. If
 reading the bytes in the other order would give a sensible time, the error says so.

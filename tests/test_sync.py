@@ -131,23 +131,27 @@ async def sync(hass: HomeAssistant, entry: MockConfigEntry) -> AtmoHistoryManage
 async def test_interval_confirmed_from_consecutive_batches(
     hass: HomeAssistant, ble: DeviceHolder
 ) -> None:
+    first = list(range(10, 110, 10))  # 10 records: enough to confirm from the gap
     ble.device = FakeAtmotube(
-        [simple_batch(T0, [10, 20, 30]), simple_batch(T0 + 180, [40, 50, 60])]
+        [simple_batch(T0, first), simple_batch(T0 + 600 - 30, [110, 120])]  # 30 s jitter
     )
     entry = await setup_entry(hass)
     manager = await sync(hass, entry)
 
     assert ble.device.acks == 2
     assert manager.status.last_result == "success"
-    assert manager.status.last_records == 6
+    assert manager.status.last_records == 12
     assert manager.pending_batches == 0
     assert manager.interval_confirmed
     assert await hour_stats(hass, STAT_TEMP) == [
-        {"start": T0, "mean": 35.0, "min": 10.0, "max": 60.0}
+        {"start": T0, "mean": 65.0, "min": 10.0, "max": 120.0}
     ]
     assert (await hour_stats(hass, STAT_PM25))[0]["mean"] == 5.0
     assert sensor_state(hass, "last_result") == "success"
-    assert sensor_state(hass, "records_imported") == "6"
+    assert sensor_state(hass, "records_imported") == "12"
+    # The jittered second batch was put back on the minute grid.
+    history = await entity_history(hass, history_entity_id(hass, "temperature"), T0 - 10)
+    assert (T0 + 600, "110") in history
     assert sensor_state(hass, "last_sync") != "unknown"
 
 
@@ -172,13 +176,15 @@ async def test_single_batch_held_until_confirmed(hass: HomeAssistant, ble: Devic
 
 
 async def test_interval_mismatch_stops_and_waits(hass: HomeAssistant, ble: DeviceHolder) -> None:
-    ble.device = FakeAtmotube([simple_batch(T0, [10, 20]), simple_batch(T0 + 600, [30])])
+    first = list(range(10, 110, 10))
+    # The second batch starts 20 minutes after the first one ends.
+    ble.device = FakeAtmotube([simple_batch(T0, first), simple_batch(T0 + 600 + 1200, [30])])
     entry = await setup_entry(hass)
     manager = await sync(hass, entry)
 
     assert ble.device.acks == 1  # second batch not acknowledged
     assert manager.status.last_result == "interval_mismatch"
-    assert "300.0 s" in manager.status.last_error
+    assert "180.0 s" in manager.status.last_error
     assert manager.pending_batches == 1
     assert ir.async_get(hass).async_get_issue(DOMAIN, f"interval_mismatch_{entry.entry_id}")
     assert await hour_stats(hass, STAT_TEMP) == []
@@ -494,3 +500,21 @@ async def test_entity_history_uses_display_unit(hass: HomeAssistant, ble: Device
     history = await entity_history(hass, entity_id, T0 - 10)
     assert history[0] == (T0, "1013.25")
     assert hass.states.get(entity_id).attributes["unit_of_measurement"] == "hPa"
+
+
+async def test_small_batches_with_jitter_do_not_stop(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    """Regression: 5-record syncs with back-dating jitter read as a 49.4 s spacing."""
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    ble.device = FakeAtmotube([simple_batch(T0, [10, 20, 30, 40, 50])])
+    await sync(hass, entry)
+    ble.device = FakeAtmotube([simple_batch(T0 + 300 - 53, [60, 70, 80, 90, 100])])
+    manager = await sync(hass, entry)
+
+    assert manager.status.last_result == "success"
+    assert manager.status.last_records == 5
+    history = await entity_history(hass, history_entity_id(hass, "temperature"), T0 - 10)
+    stamps = [ts for ts, _ in history if ts < T0 + 3600]
+    assert stamps == [T0 + 60 * i for i in range(10)]

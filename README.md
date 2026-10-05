@@ -59,11 +59,16 @@ retried (see below) and never lose data, but turning polling off avoids the cont
 
 The transfer uses the Nordic UART service (`6E400001-…`). The integration sends `HST` plus the
 current time. The device then sends batches, each an `HT` header followed by `HD` data packets.
-Each **complete** batch is written to the recorder, the commit is awaited, the batch is written
-to InfluxDB if that is enabled, and only then is it acknowledged with `HOK`. A disconnect, a
-timeout, a missing or duplicate packet, or any storage failure means the batch is **not**
-acknowledged, so the device keeps it and sends it again next time. Re-sent data is
-de-duplicated, so hours are never double-counted.
+Each **complete** batch is first saved as raw bytes in Home Assistant's storage, and only then
+acknowledged with `HOK`. The device waits only about **5 seconds** for that acknowledgement
+before sending the batch again, which is too short to wait for the recorder. So statistics and
+InfluxDB are written from the saved batch straight after. If either fails, the batch stays saved
+and the import is retried on the next sync. Nothing is deleted until it has been imported.
+
+A disconnect, a timeout, a missing or out-of-step packet, or a failure to save means the batch
+is **not** acknowledged, so the device keeps it and sends it again next time. If the device sends
+records that are already stored (for example because an acknowledgement arrived late), they are
+recognised by their bytes and start time, and only the new records are imported.
 
 ## Protocol details that are not officially documented
 
@@ -76,6 +81,7 @@ leaves some details out. This is how the integration handles each one:
 | Interval between records | 60 s by default, **checked automatically** (see below) | atmotuber, and a real capture (37 records ending exactly at the sync time) |
 | `HT` count and `HD` number bytes | A **record** count and a **running record total**, not packet counts. Over a proxy each `HD` carries up to 15 records (e.g. `HT` 37, then `HD` 15, 30, 37). | Real capture. atmotuber's `diff` logic agrees. |
 | Record size | 16 bytes: the 14 documented bytes, then 2 unknown bytes (always 0 so far) | atmotuber and a real capture |
+| Acknowledgement window | About 5 s after the last `HD`; after that the device sends the batch again | Real capture |
 | "No reading" markers | `0x80` temperature/humidity, `0xFFFF` VOC/PM, `0xFFFFFFFF` pressure: skipped | Real capture (the pressure marker is assumed by analogy); Atmotube's Android library for PM |
 
 **Interval check.** The interval is never assumed. It is confirmed in either of two ways:
@@ -127,7 +133,7 @@ reading the bytes in the other order would give a sensible time, the error says 
 | Seconds between history records | 60 | See the interval check above |
 | I have verified the record interval | off | Only acts at the moment you save the form |
 | Dry run | off | |
-| InfluxDB v2 URL / token / org / bucket | — | Tested when saved. A write failure blocks the acknowledgement. |
+| InfluxDB v2 URL / token / org / bucket | — | Tested when saved. A failed write is retried on the next sync. |
 
 ## What you get
 

@@ -29,6 +29,7 @@ from .aggregate import (
     HourlyAggregator,
     batch_ends_at,
     classify_interval,
+    is_resend,
     measured_interval,
 )
 from .ble import async_download_history
@@ -117,15 +118,6 @@ class SyncStatus:
         return status
 
 
-def _batch_to_dict(batch: HistoryBatch) -> dict[str, Any]:
-    return {
-        "first_timestamp": batch.header.first_timestamp,
-        "record_count": batch.header.record_count,
-        "record_size": batch.header.record_size,
-        "payload": batch.payload().hex(),
-    }
-
-
 def _batch_from_dict(data: dict[str, Any]) -> HistoryBatch:
     batch = HistoryBatch(
         HistoryHeader(
@@ -149,12 +141,17 @@ class AtmoHistoryManager:
         self.address: str = entry.unique_id or entry.data["address"]
         self.name = entry.title
         self.status = SyncStatus()
+        # Small store written before every ACK; the device resends a batch
+        # if it is not acknowledged within about 5 s.
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
+        self._hours_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.hours"
+        )
         self._aggregator = HourlyAggregator()
         self._confirmed_interval: int | None = None
-        self._last_batch: dict[str, int] | None = None
+        self._last_batch: dict[str, Any] | None = None
         self._pending: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self._last_seen: float | None = None
@@ -165,6 +162,7 @@ class AtmoHistoryManager:
         self._session_imported = 0
         self._session_decoded = 0
         self._session_started: int | None = None
+        self._session_resends = 0
         self._unsubs: list[Callable[[], None]] = []
 
     # Options -----------------------------------------------------------
@@ -197,16 +195,23 @@ class AtmoHistoryManager:
     async def async_load(self) -> None:
         """Load persisted state."""
         data = await self._store.async_load() or {}
-        self._aggregator = HourlyAggregator.from_dict(data.get("hours"))
+        hours = await self._hours_store.async_load()
+        # Version 0.1.1 kept the hours in the main store.
+        self._aggregator = HourlyAggregator.from_dict(
+            hours.get("hours") if hours else data.get("hours")
+        )
         self._confirmed_interval = data.get("confirmed_interval")
         self._last_batch = data.get("last_batch")
         self._pending = data.get("pending", [])
         self.status = SyncStatus.from_dict(data.get("status"))
 
     async def _async_save(self) -> None:
+        await self._hours_store.async_save({"hours": self._aggregator.as_dict()})
+        await self._async_save_sync_state()
+
+    async def _async_save_sync_state(self) -> None:
         await self._store.async_save(
             {
-                "hours": self._aggregator.as_dict(),
                 "confirmed_interval": self._confirmed_interval,
                 "last_batch": self._last_batch,
                 "pending": self._pending,
@@ -306,6 +311,7 @@ class AtmoHistoryManager:
         self._session_imported = 0
         self._session_decoded = 0
         self._session_started = int(dt_util.utcnow().timestamp())
+        self._session_resends = 0
         dry_run = bool(self._opt(CONF_DRY_RUN, False))
 
         ble_device = bluetooth.async_ble_device_from_address(
@@ -319,6 +325,10 @@ class AtmoHistoryManager:
             )
             return
 
+        outcome: str | None = None
+        failed = False
+        error: str | None = None
+        result = None
         try:
             async with asyncio.timeout(SESSION_TIMEOUT):
                 result = await async_download_history(
@@ -340,34 +350,41 @@ class AtmoHistoryManager:
                 },
             )
             _LOGGER.warning("%s; sync stopped until the interval is resolved", err)
-            await self._async_finish(RESULT_INTERVAL_MISMATCH, failed=False, error=str(err))
-            return
+            outcome, error = RESULT_INTERVAL_MISMATCH, str(err)
         except (
             ProtocolError,
             TransferAborted,
             BleakError,
             TimeoutError,
-            influx.InfluxError,
             HomeAssistantError,
         ) as err:
-            message = str(err) or type(err).__name__
-            _LOGGER.warning("History sync for %s failed: %s", self.address, message)
-            await self._async_finish(RESULT_ERROR, failed=True, error=message)
-            return
+            error = str(err) or type(err).__name__
+            _LOGGER.warning("History sync for %s failed: %s", self.address, error)
+            outcome, failed = RESULT_ERROR, True
         except Exception as err:
             _LOGGER.exception("Unexpected error during history sync")
-            await self._async_finish(RESULT_ERROR, failed=True, error=repr(err))
-            return
+            outcome, failed, error = RESULT_ERROR, True, repr(err)
 
-        if dry_run:
-            outcome = RESULT_DRY_RUN
-        elif self._pending:
-            outcome = RESULT_AWAITING_INTERVAL
-        elif result.batches_acked == 0:
-            outcome = RESULT_NO_DATA
-        else:
-            outcome = RESULT_SUCCESS
-        await self._async_finish(outcome, failed=False, error=None)
+        # Batches acknowledged in this or earlier sessions are held in storage;
+        # import them now, even if the transfer itself failed later on.
+        if not dry_run and self._pending and self.interval_confirmed:
+            try:
+                await self._async_import_pending()
+            except (influx.InfluxError, HomeAssistantError, ProtocolError) as err:
+                _LOGGER.warning("Importing history for %s failed: %s", self.address, err)
+                if outcome is None:
+                    outcome, failed, error = RESULT_ERROR, True, f"Import failed: {err}"
+
+        if outcome is None:
+            if dry_run:
+                outcome = RESULT_DRY_RUN
+            elif self._pending:
+                outcome = RESULT_AWAITING_INTERVAL
+            elif self._session_imported == 0 and (result is None or result.batches_acked == 0):
+                outcome = RESULT_NO_DATA
+            else:
+                outcome = RESULT_SUCCESS
+        await self._async_finish(outcome, failed=failed, error=error)
 
     async def _async_finish(self, result: str, failed: bool, error: str | None) -> None:
         self._failed = failed
@@ -399,6 +416,64 @@ class AtmoHistoryManager:
                 _LOGGER.info("Dry run record: %s", record)
             return False
 
+        payload = batch.payload()
+        first = header.first_timestamp
+        skip = 0
+        prev = self._last_batch
+        if prev and is_resend(prev["first_timestamp"], prev["record_count"], first, interval):
+            # The device sent the previous batch again (an acknowledgement was
+            # not applied). Keep the earlier timestamps; only the tail is new.
+            if (known := prev.get("payload")) is not None and not payload.startswith(
+                bytes.fromhex(known)
+            ):
+                raise ProtocolError(
+                    f"Device re-sent a batch starting near {prev['first_timestamp']} "
+                    "with different data"
+                )
+            if batch.record_count < prev["record_count"]:
+                raise ProtocolError(
+                    f"Device re-sent a batch with {batch.record_count} records, "
+                    f"fewer than the {prev['record_count']} already stored"
+                )
+            skip, first = prev["record_count"], prev["first_timestamp"]
+            self._session_resends += 1
+            _LOGGER.info(
+                "Device re-sent %s already stored records; %s are new",
+                skip,
+                batch.record_count - skip,
+            )
+            if skip == batch.record_count and self._session_resends > 1:
+                _LOGGER.warning("Device keeps re-sending the same records; stopping")
+                return False
+        else:
+            self._check_interval(batch)
+
+        if batch.record_count > skip:
+            self._pending.append(
+                {
+                    "first_timestamp": first,
+                    "record_count": batch.record_count,
+                    "record_size": header.record_size,
+                    "payload": payload.hex(),
+                    "skip": skip,
+                }
+            )
+            if not self.interval_confirmed:
+                _LOGGER.info("Holding batch at %s until the record interval is confirmed", first)
+        self._last_batch = {
+            "first_timestamp": first,
+            "record_count": batch.record_count,
+            "payload": payload.hex(),
+        }
+        # Only the small store is written here so the ACK goes out quickly;
+        # statistics and InfluxDB are written from the held batches afterwards.
+        await self._async_save_sync_state()
+        return True
+
+    def _check_interval(self, batch: HistoryBatch) -> None:
+        """Confirm the record interval, or raise IntervalMismatch."""
+        header = batch.header
+        interval = self.interval
         if (
             not self.interval_confirmed
             and self._session_started is not None
@@ -412,42 +487,25 @@ class AtmoHistoryManager:
             )
             self._confirmed_interval = interval
 
-        if self._last_batch:
-            measured = measured_interval(
-                self._last_batch["first_timestamp"],
-                self._last_batch["record_count"],
-                header.first_timestamp,
-            )
-            if measured is not None:
-                verdict = classify_interval(measured, interval, self.interval_confirmed)
-                if verdict == INTERVAL_MATCH and not self.interval_confirmed:
-                    _LOGGER.info("Record interval of %s s confirmed", interval)
-                    self._confirmed_interval = interval
-                elif verdict == INTERVAL_GAP:
-                    _LOGGER.info(
-                        "Recording gap before %s (spacing %.1f s)",
-                        header.first_timestamp,
-                        measured,
-                    )
-                elif verdict != INTERVAL_MATCH:
-                    raise IntervalMismatch(measured, interval)
-
-        if self.interval_confirmed:
-            await self._async_import_pending()
-            await self._async_import(batch.records(interval))
-        else:
+        if not self._last_batch:
+            return
+        measured = measured_interval(
+            self._last_batch["first_timestamp"],
+            self._last_batch["record_count"],
+            header.first_timestamp,
+        )
+        if measured is None:
+            return
+        verdict = classify_interval(measured, interval, self.interval_confirmed)
+        if verdict == INTERVAL_MATCH and not self.interval_confirmed:
+            _LOGGER.info("Record interval of %s s confirmed", interval)
+            self._confirmed_interval = interval
+        elif verdict == INTERVAL_GAP:
             _LOGGER.info(
-                "Holding batch at %s until the record interval is confirmed",
-                header.first_timestamp,
+                "Recording gap before %s (spacing %.1f s)", header.first_timestamp, measured
             )
-            self._pending.append(_batch_to_dict(batch))
-
-        self._last_batch = {
-            "first_timestamp": header.first_timestamp,
-            "record_count": batch.record_count,
-        }
-        await self._async_save()
-        return True
+        elif verdict != INTERVAL_MATCH:
+            raise IntervalMismatch(measured, interval)
 
     async def _async_import_pending_locked(self) -> None:
         async with self._lock:
@@ -461,8 +519,9 @@ class AtmoHistoryManager:
 
     async def _async_import_pending(self) -> None:
         while self._pending:
-            batch = _batch_from_dict(self._pending[0])
-            await self._async_import(batch.records(self.interval))
+            entry = self._pending[0]
+            batch = _batch_from_dict(entry)
+            await self._async_import(batch.records(self.interval)[entry.get("skip", 0) :])
             self._pending.pop(0)
             await self._async_save()
 

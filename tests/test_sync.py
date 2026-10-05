@@ -19,6 +19,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.atmo_history import statistics as statistics_module
 from custom_components.atmo_history.aggregate import hour_start
 from custom_components.atmo_history.const import (
     CONF_DRY_RUN,
@@ -237,7 +238,7 @@ async def test_influx_written_before_ack(hass: HomeAssistant, ble: DeviceHolder)
     assert ble.device.acks == 1
 
 
-async def test_influx_failure_blocks_ack_and_retry_does_not_double_count(
+async def test_influx_failure_keeps_batch_and_retries(
     hass: HomeAssistant, ble: DeviceHolder
 ) -> None:
     ble.device = FakeAtmotube([simple_batch(T0, [10, 20])])
@@ -249,18 +250,109 @@ async def test_influx_failure_blocks_ack_and_retry_does_not_double_count(
         AsyncMock(side_effect=InfluxError("HTTP 503")),
     ):
         manager = await sync(hass, entry)
-    assert ble.device.ack_writes == []
+    # Safely held in storage first, so acknowledged; the import is retried.
+    assert ble.device.acks == 1
     assert manager.status.last_result == "error"
+    assert "HTTP 503" in manager.status.last_error
+    assert manager.pending_batches == 1
     assert manager._failed
 
-    # The device resends the same batch; statistics must not double count.
+    ble.device = FakeAtmotube([])
     with patch("custom_components.atmo_history.manager.influx.async_write", AsyncMock()):
         manager = await sync(hass, entry)
-    assert ble.device.acks == 1
+    assert manager.status.last_result == "success"
     assert manager.status.last_records == 2
+    assert manager.pending_batches == 0
+    # Statistics were written in both attempts but are not double counted.
     assert await hour_stats(hass, STAT_TEMP) == [
         {"start": T0, "mean": 15.0, "min": 10.0, "max": 20.0}
     ]
+
+
+async def test_ack_does_not_wait_for_import(hass: HomeAssistant, ble: DeviceHolder) -> None:
+    ble.device = FakeAtmotube([simple_batch(T0, [10, 20])])
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    acks_at_import: list[int] = []
+
+    real_import = statistics_module.async_import_records
+
+    async def slow_import(*args: Any, **kwargs: Any) -> int:
+        acks_at_import.append(ble.device.acks)
+        return await real_import(*args, **kwargs)
+
+    with patch(
+        "custom_components.atmo_history.manager.async_import_records", side_effect=slow_import
+    ):
+        manager = await sync(hass, entry)
+    assert acks_at_import == [1]
+    assert manager.status.last_result == "success"
+
+
+async def test_resend_in_same_session_imports_only_new_records(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    first = int(time.time()) - 3 * 60
+    ble.device = FakeAtmotube(
+        [
+            simple_batch(first, [10, 20, 30]),
+            simple_batch(first, [10, 20, 30, 40]),  # ACK not applied: resent + 1 new
+            simple_batch(first, [10, 20, 30, 40]),  # and again, nothing new
+        ]
+    )
+    entry = await setup_entry(hass)
+    manager = await sync(hass, entry)
+
+    assert manager.status.last_result == "success"
+    assert manager.status.last_records == 4
+    assert ble.device.acks == 2  # stops at the second resend, which has nothing new
+    total = sum(bucket.metrics["temperature"][0] for bucket in manager._aggregator.buckets.values())
+    assert total == 4
+
+
+async def test_resend_in_later_session_with_shifted_start(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    ble.device = FakeAtmotube([simple_batch(T0, [10, 20, 30])])
+    await sync(hass, entry)
+
+    # Next visit: the device back-dates differently (57 s later) and resends.
+    ble.device = FakeAtmotube([simple_batch(T0 + 57, [10, 20, 30, 40, 50])])
+    manager = await sync(hass, entry)
+    assert manager.status.last_result == "success"
+    assert manager.status.last_records == 2
+    assert await hour_stats(hass, STAT_TEMP) == [
+        {"start": T0, "mean": 30.0, "min": 10.0, "max": 50.0}
+    ]
+
+
+async def test_resend_after_upgrade_without_stored_payload(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    entry = await setup_entry(hass)
+    manager: AtmoHistoryManager = entry.runtime_data
+    await manager.async_confirm_interval(60)
+    manager._last_batch = {"first_timestamp": T0, "record_count": 2}  # 0.1.1 format
+    ble.device = FakeAtmotube([simple_batch(T0 + 57, [10, 20, 30])])
+    manager = await sync(hass, entry)
+    assert manager.status.last_result == "success"
+    assert manager.status.last_records == 1
+
+
+async def test_resend_with_different_data_is_rejected(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    ble.device = FakeAtmotube([simple_batch(T0, [10, 20, 30])])
+    await sync(hass, entry)
+    ble.device = FakeAtmotube([simple_batch(T0 + 10, [99, 20, 30, 40])])
+    manager = await sync(hass, entry)
+    assert manager.status.last_result == "error"
+    assert "different data" in manager.status.last_error
+    assert ble.device.ack_writes == []
 
 
 async def test_hour_merged_across_syncs(hass: HomeAssistant, ble: DeviceHolder) -> None:

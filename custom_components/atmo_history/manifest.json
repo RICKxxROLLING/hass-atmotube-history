@@ -17,5 +17,5 @@
   "issue_tracker": "https://github.com/RICKxxROLLING/hass-atmotube-history/issues",
   "loggers": ["custom_components.atmo_history"],
   "requirements": [],
-  "version": "0.1.2"
+  "version": "0.1.3"
 }

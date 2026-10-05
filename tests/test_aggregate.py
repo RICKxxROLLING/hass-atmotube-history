@@ -13,6 +13,7 @@ from custom_components.atmo_history.aggregate import (
     batch_ends_at,
     classify_interval,
     hour_start,
+    is_resend,
     measured_interval,
 )
 from custom_components.atmo_history.protocol import HistoryRecord
@@ -109,3 +110,11 @@ def test_batch_ends_at() -> None:
     assert not batch_ends_at(H, 37, 120, H + 37 * 60)
     assert not batch_ends_at(H, 37, 30, H + 37 * 60)
     assert not batch_ends_at(H, 0, 60, H)
+
+
+def test_is_resend() -> None:
+    assert is_resend(H, 44, H, 60)
+    assert is_resend(H, 44, H + 57, 60)
+    assert not is_resend(H, 44, H + 44 * 60, 60)
+    assert not is_resend(H, 44, H + 44 * 60 + 3600, 60)
+    assert not is_resend(H, 0, H, 60)

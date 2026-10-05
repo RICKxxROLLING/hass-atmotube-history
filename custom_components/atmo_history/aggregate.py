@@ -183,3 +183,15 @@ def batch_ends_at(first: int, count: int, interval: int, now: int) -> bool:
     ever confirms an interval; a miss can just mean older data.
     """
     return count > 0 and abs(first + count * interval - now) <= interval
+
+
+def is_resend(prev_first: int, prev_count: int, new_first: int, interval: int) -> bool:
+    """Return True if a batch header looks like the previous batch again.
+
+    The device back-dates the first record from the time we send, so a
+    re-sent batch starts within about one interval of the previous start,
+    while a genuinely new batch starts where the previous one ended.
+    """
+    if prev_count <= 0:
+        return False
+    return abs(new_first - prev_first) < abs(new_first - (prev_first + prev_count * interval))

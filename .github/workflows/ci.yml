@@ -29,4 +29,4 @@ jobs:
         with:
           category: integration
           # Store-listing checks; not needed to install as a custom repository.
-          ignore: brands description topics license
+          ignore: brands description topics

@@ -113,11 +113,12 @@ async def async_import_records(
     aggregator: HourlyAggregator,
     records: Sequence[HistoryRecord],
     interval: int,
-) -> int:
+) -> tuple[int, set[int]]:
     """Merge records into hourly statistics and wait for the recorder commit.
 
     ``aggregator`` is updated in place; the caller persists it only after
-    everything else has succeeded. Returns the number of new records.
+    everything else has succeeded. Returns the number of new records and the
+    hours (start timestamps) that changed.
     """
     cutoff = hour_start(int(dt_util.utcnow().timestamp())) - TRACKED_HOURS_DAYS * 86400
     await _async_seed_old_hours(hass, address, aggregator, records, interval, cutoff)
@@ -137,4 +138,4 @@ async def async_import_records(
         await get_instance(hass).async_block_till_done()
 
     aggregator.prune(cutoff)
-    return added
+    return added, touched

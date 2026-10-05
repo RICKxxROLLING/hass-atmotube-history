@@ -4,7 +4,9 @@
     "step": {
       "user": {
         "description": "Pick a discovered Atmotube PRO or type its MAC address.",
-        "data": { "address": "Device" }
+        "data": {
+          "address": "Device"
+        }
       },
       "bluetooth_confirm": {
         "description": "Set up history backfill for {name} ({address})?"
@@ -47,8 +49,12 @@
   },
   "entity": {
     "sensor": {
-      "last_sync": { "name": "Last history sync" },
-      "records_imported": { "name": "History records imported" },
+      "last_sync": {
+        "name": "Last history sync"
+      },
+      "records_imported": {
+        "name": "History records imported"
+      },
       "last_result": {
         "name": "Last history sync result",
         "state": {
@@ -60,6 +66,27 @@
           "device_unavailable": "Device unavailable",
           "error": "Error"
         }
+      },
+      "temperature_history": {
+        "name": "Temperature history"
+      },
+      "humidity_history": {
+        "name": "Humidity history"
+      },
+      "voc_history": {
+        "name": "VOC history"
+      },
+      "pressure_history": {
+        "name": "Pressure history"
+      },
+      "pm1_history": {
+        "name": "PM1 history"
+      },
+      "pm25_history": {
+        "name": "PM2.5 history"
+      },
+      "pm10_history": {
+        "name": "PM10 history"
       }
     }
   },
@@ -70,8 +97,12 @@
     }
   },
   "exceptions": {
-    "no_entry": { "message": "No loaded Atmotube History entry matches." },
-    "already_syncing": { "message": "A history sync is already running." }
+    "no_entry": {
+      "message": "No loaded Atmotube History entry matches."
+    },
+    "already_syncing": {
+      "message": "A history sync is already running."
+    }
   },
   "services": {
     "sync_now": {

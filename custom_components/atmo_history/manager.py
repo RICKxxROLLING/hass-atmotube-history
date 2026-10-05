@@ -6,12 +6,20 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bleak.exc import BleakError
 from homeassistant.components import bluetooth
+from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
+from homeassistant.components.recorder.statistics import async_import_statistics
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -60,6 +68,7 @@ from .const import (
     SESSION_TIMEOUT,
     SIGNAL_UPDATED,
 )
+from .history import async_backfill_states
 from .protocol import (
     HistoryBatch,
     HistoryDataPacket,
@@ -68,7 +77,10 @@ from .protocol import (
     ProtocolError,
     TransferAborted,
 )
-from .statistics import async_import_records
+from .statistics import METRIC_META, async_import_records
+
+if TYPE_CHECKING:
+    from .sensor import AtmoHistoryValueSensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -164,6 +176,8 @@ class AtmoHistoryManager:
         self._session_started: int | None = None
         self._session_resends = 0
         self._unsubs: list[Callable[[], None]] = []
+        # metric -> history value sensor, filled in by the sensor platform
+        self.history_entities: dict[str, AtmoHistoryValueSensor] = {}
 
     # Options -----------------------------------------------------------
 
@@ -530,7 +544,7 @@ class AtmoHistoryManager:
         if not records:
             return
         aggregator = self._aggregator.copy()
-        added = await async_import_records(
+        added, touched = await async_import_records(
             self.hass, self.address, self.name, aggregator, records, self.interval
         )
         if self._opt(CONF_INFLUX_ENABLED, False):
@@ -542,6 +556,7 @@ class AtmoHistoryManager:
                 self._opt(CONF_INFLUX_BUCKET, ""),
                 influx.to_line_protocol(self.address, records),
             )
+        await self._async_write_entity_history(records, aggregator, touched)
         self._aggregator = aggregator
         self._session_imported += added
         _LOGGER.debug(
@@ -551,3 +566,63 @@ class AtmoHistoryManager:
             records[0].timestamp,
             records[-1].timestamp,
         )
+
+    async def _async_write_entity_history(
+        self,
+        records: list[HistoryRecord],
+        aggregator: HourlyAggregator,
+        touched: set[int],
+    ) -> None:
+        """Give the history sensors the records as their recorded history.
+
+        Each minute record becomes a state row with its original time, and the
+        hourly statistics are attached to the entity as well, so history graphs
+        show minute detail while the recorder keeps it and hourly data after.
+        """
+        rows: dict[str, list[tuple[float, str]]] = {}
+        for metric, entity in self.history_entities.items():
+            if entity.entity_id is None:
+                continue
+            points = [
+                (record.timestamp, value)
+                for record in records
+                if (value := getattr(record, metric)) is not None
+            ]
+            if not points:
+                continue
+            # Record the newest reading as the live state first: that also
+            # creates the entity's recorder metadata used by the backfill.
+            entity.set_latest(points[-1][1], points[-1][0])
+            rows[entity.entity_id] = [(float(ts), entity.render_state(v)) for ts, v in points]
+        if not rows:
+            return
+        await async_backfill_states(self.hass, rows)
+
+        for metric, entity in self.history_entities.items():
+            if entity.entity_id not in rows:
+                continue
+            hourly = [
+                StatisticData(
+                    start=datetime.fromtimestamp(start, UTC),
+                    mean=entity.convert(stats.mean),
+                    min=entity.convert(stats.min),
+                    max=entity.convert(stats.max),
+                )
+                for start in sorted(touched)
+                if (stats := aggregator.stats(start).get(metric)) is not None
+            ]
+            if hourly:
+                async_import_statistics(
+                    self.hass,
+                    StatisticMetaData(
+                        mean_type=StatisticMeanType.ARITHMETIC,
+                        has_sum=False,
+                        name=None,
+                        source=RECORDER_DOMAIN,
+                        statistic_id=entity.entity_id,
+                        unit_class=METRIC_META[metric][2],
+                        unit_of_measurement=entity.unit_of_measurement,
+                    ),
+                    hourly,
+                )
+        await get_instance(self.hass).async_block_till_done()

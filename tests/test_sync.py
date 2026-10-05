@@ -5,12 +5,14 @@ from __future__ import annotations
 import time
 from collections.abc import Generator
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from bleak.backends.device import BLEDevice
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.history import get_significant_states
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
@@ -417,3 +419,78 @@ async def test_interval_confirmed_when_newest_batch_ends_now(
     assert manager.interval_confirmed
     assert manager.pending_batches == 0
     assert manager.status.last_records == 3
+
+
+def history_entity_id(hass: HomeAssistant, metric: str) -> str:
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{ADDRESS}_{metric}_history"
+    )
+    assert entity_id
+    return entity_id
+
+
+async def entity_history(hass: HomeAssistant, entity_id: str, since: int) -> list[tuple[int, str]]:
+    await get_instance(hass).async_block_till_done()
+    states = await get_instance(hass).async_add_executor_job(
+        partial(
+            get_significant_states,
+            hass,
+            datetime.fromtimestamp(since, UTC),
+            None,
+            [entity_id],
+            include_start_time_state=False,
+            significant_changes_only=False,
+        )
+    )
+    return [(round(s.last_updated.timestamp()), s.state) for s in states.get(entity_id, [])]
+
+
+async def test_minute_history_written_to_entity(hass: HomeAssistant, ble: DeviceHolder) -> None:
+    first = T0 + 600
+    ble.device = FakeAtmotube([simple_batch(first, [10, 20, 30])])
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    await sync(hass, entry)
+
+    entity_id = history_entity_id(hass, "temperature")
+    assert hass.states.get(entity_id).state == "30"
+    history = await entity_history(hass, entity_id, first - 10)
+    assert history[:3] == [(first, "10"), (first + 60, "20"), (first + 120, "30")]
+
+    rows = await hour_stats(hass, entity_id)
+    assert rows == [{"start": T0, "mean": 20.0, "min": 10.0, "max": 30.0}]
+
+
+async def test_entity_history_not_duplicated_on_retry(
+    hass: HomeAssistant, ble: DeviceHolder
+) -> None:
+    ble.device = FakeAtmotube([simple_batch(T0, [10, 20])])
+    entry = await setup_entry(hass, INFLUX)
+    await entry.runtime_data.async_confirm_interval(60)
+    with patch(
+        "custom_components.atmo_history.manager.influx.async_write",
+        AsyncMock(side_effect=InfluxError("HTTP 503")),
+    ):
+        await sync(hass, entry)
+    ble.device = FakeAtmotube([])
+    with patch("custom_components.atmo_history.manager.influx.async_write", AsyncMock()):
+        await sync(hass, entry)
+
+    history = await entity_history(hass, history_entity_id(hass, "temperature"), T0 - 10)
+    assert [h for h in history if h[0] < T0 + 3600] == [(T0, "10"), (T0 + 60, "20")]
+
+
+async def test_entity_history_uses_display_unit(hass: HomeAssistant, ble: DeviceHolder) -> None:
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    entity_id = history_entity_id(hass, "pressure")
+    er.async_get(hass).async_update_entity_options(
+        entity_id, "sensor", {"unit_of_measurement": "hPa"}
+    )
+    await hass.async_block_till_done()
+
+    ble.device = FakeAtmotube([simple_batch(T0, [10], pressure=101325)])
+    await sync(hass, entry)
+    history = await entity_history(hass, entity_id, T0 - 10)
+    assert history[0] == (T0, "1013.25")
+    assert hass.states.get(entity_id).attributes["unit_of_measurement"] == "hPa"

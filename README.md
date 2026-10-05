@@ -137,6 +137,25 @@ reading the bytes in the other order would give a sensible time, the error says 
 
 ## What you get
 
+**History sensors (minute by minute).** `PM1 history`, `PM2.5 history`, `PM10 history`,
+`VOC history`, `Pressure history`, `Temperature history` and `Humidity history`. Each one's state
+is the newest downloaded reading. Every downloaded record is written into the entity's recorded
+history **with its original timestamp**, so the History panel and history graph cards show the
+full minute-by-minute data, including the time the car was away.
+
+- Minute rows are kept as long as the recorder keeps any entity history (`purge_keep_days`, 10
+  days by default). Hourly mean/min/max is also attached to these entities as long-term
+  statistics, so graphs of older periods still show hourly data.
+- Home Assistant has no public API for recording states in the past. The integration inserts
+  these rows through a task on the recorder's own queue, the same way the recorder imports
+  statistics. A future Home Assistant update could change the database layout and break this
+  until the integration is updated. If that happens, the import reports an error and the
+  downloaded batches stay saved and are retried.
+- If you exclude these entities from the recorder, their minute history is skipped (with a
+  warning in the log).
+- A display unit chosen in the entity's settings (e.g. hPa for pressure) is applied to the
+  backfilled rows too.
+
 **Statistics** (use them in *Statistics graph* cards, or under *Developer tools → Statistics*):
 
 | Statistic ID | Unit |

@@ -66,9 +66,13 @@ def mock_sync() -> Generator[AsyncMock]:
         yield mock
 
 
-async def setup(hass: HomeAssistant) -> AtmoHistoryManager:
+async def setup(hass: HomeAssistant, options: dict[str, Any] | None = None) -> AtmoHistoryManager:
     entry = MockConfigEntry(
-        domain=DOMAIN, unique_id=ADDRESS, data={CONF_ADDRESS: ADDRESS}, title="Atmo"
+        domain=DOMAIN,
+        unique_id=ADDRESS,
+        data={CONF_ADDRESS: ADDRESS},
+        title="Atmo",
+        options=options or {},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
@@ -137,7 +141,7 @@ async def test_reappearance_after_absence(
 async def test_retry_while_in_range_after_failure(
     hass: HomeAssistant, registered: dict[str, Any], clock: Clock, mock_sync: AsyncMock
 ) -> None:
-    manager = await setup(hass)
+    manager = await setup(hass, {"in_range_minutes": 0})
     advertise(registered)
     await advance(hass, clock, 31)
     assert mock_sync.call_count == 1
@@ -157,14 +161,51 @@ async def test_retry_while_in_range_after_failure(
     assert mock_sync.call_args.args[1] == "retry"
 
 
-async def test_no_retry_after_success(
+async def test_no_resync_after_success_when_periodic_off(
+    hass: HomeAssistant, registered: dict[str, Any], clock: Clock, mock_sync: AsyncMock
+) -> None:
+    manager = await setup(hass, {"in_range_minutes": 0})
+    advertise(registered)
+    await advance(hass, clock, 31)
+    manager._last_attempt = clock.now
+    for _ in range(6):
+        await advance(hass, clock, 300)
+        advertise(registered)
+        await advance(hass, clock, 0)
+    assert mock_sync.call_count == 1
+
+
+async def test_periodic_sync_while_in_range(
+    hass: HomeAssistant, registered: dict[str, Any], clock: Clock, mock_sync: AsyncMock
+) -> None:
+    manager = await setup(hass)  # default: every 5 minutes
+    advertise(registered)
+    await advance(hass, clock, 31)
+    assert mock_sync.call_count == 1
+    manager._last_attempt = clock.now
+
+    for _ in range(4):  # advertisements every minute, under 5 minutes
+        await advance(hass, clock, 60)
+        advertise(registered)
+        await advance(hass, clock, 0)
+    assert mock_sync.call_count == 1
+
+    await advance(hass, clock, 60)
+    advertise(registered)
+    await advance(hass, clock, 0)
+    assert mock_sync.call_count == 2
+    assert mock_sync.call_args.args[1] == "periodic"
+
+
+async def test_failed_sync_uses_retry_interval_not_periodic(
     hass: HomeAssistant, registered: dict[str, Any], clock: Clock, mock_sync: AsyncMock
 ) -> None:
     manager = await setup(hass)
     advertise(registered)
     await advance(hass, clock, 31)
+    manager._failed = True
     manager._last_attempt = clock.now
-    for _ in range(6):
+    for _ in range(2):  # 10 minutes: past the 5-minute periodic, before the 15-minute retry
         await advance(hass, clock, 300)
         advertise(registered)
         await advance(hass, clock, 0)

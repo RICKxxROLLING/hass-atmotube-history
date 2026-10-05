@@ -38,6 +38,7 @@ from .const import (
     CONF_ABSENT_MINUTES,
     CONF_CONFIRM_INTERVAL,
     CONF_DRY_RUN,
+    CONF_IN_RANGE_MINUTES,
     CONF_INFLUX_BUCKET,
     CONF_INFLUX_ENABLED,
     CONF_INFLUX_ORG,
@@ -47,6 +48,7 @@ from .const import (
     CONF_RETRY_MINUTES,
     CONF_SYNC_DELAY,
     DEFAULT_ABSENT_MINUTES,
+    DEFAULT_IN_RANGE_MINUTES,
     DEFAULT_RECORD_INTERVAL,
     DEFAULT_RETRY_MINUTES,
     DEFAULT_SYNC_DELAY,
@@ -163,6 +165,7 @@ class AtmoHistoryOptionsFlow(OptionsFlow):
                 CONF_ABSENT_MINUTES,
                 CONF_SYNC_DELAY,
                 CONF_RETRY_MINUTES,
+                CONF_IN_RANGE_MINUTES,
                 CONF_RECORD_INTERVAL,
             ):
                 user_input[key] = int(user_input[key])
@@ -203,6 +206,10 @@ class AtmoHistoryOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_RETRY_MINUTES, **opt(CONF_RETRY_MINUTES, DEFAULT_RETRY_MINUTES)
                 ): _minutes(1, 1440),
+                vol.Required(
+                    CONF_IN_RANGE_MINUTES,
+                    **opt(CONF_IN_RANGE_MINUTES, DEFAULT_IN_RANGE_MINUTES),
+                ): _minutes(0, 1440),
                 vol.Required(
                     CONF_RECORD_INTERVAL, **opt(CONF_RECORD_INTERVAL, DEFAULT_RECORD_INTERVAL)
                 ): NumberSelector(

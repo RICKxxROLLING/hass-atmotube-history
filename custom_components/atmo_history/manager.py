@@ -44,6 +44,7 @@ from .ble import async_download_history
 from .const import (
     CONF_ABSENT_MINUTES,
     CONF_DRY_RUN,
+    CONF_IN_RANGE_MINUTES,
     CONF_INFLUX_BUCKET,
     CONF_INFLUX_ENABLED,
     CONF_INFLUX_ORG,
@@ -53,6 +54,7 @@ from .const import (
     CONF_RETRY_MINUTES,
     CONF_SYNC_DELAY,
     DEFAULT_ABSENT_MINUTES,
+    DEFAULT_IN_RANGE_MINUTES,
     DEFAULT_RECORD_INTERVAL,
     DEFAULT_RETRY_MINUTES,
     DEFAULT_SYNC_DELAY,
@@ -282,13 +284,21 @@ class AtmoHistoryManager:
             return
         absent = float(self._opt(CONF_ABSENT_MINUTES, DEFAULT_ABSENT_MINUTES)) * 60
         retry = float(self._opt(CONF_RETRY_MINUTES, DEFAULT_RETRY_MINUTES)) * 60
+        in_range = float(self._opt(CONF_IN_RANGE_MINUTES, DEFAULT_IN_RANGE_MINUTES)) * 60
+        since_attempt = None if self._last_attempt is None else now - self._last_attempt
         if previous is None or now - previous >= absent:
             delay = float(self._opt(CONF_SYNC_DELAY, DEFAULT_SYNC_DELAY))
             _LOGGER.debug("%s reappeared, syncing in %s s", self.address, delay)
             self._schedule(delay, "reappeared")
-        elif self._failed and self._last_attempt is not None and now - self._last_attempt >= retry:
-            _LOGGER.debug("%s still in range after a failed sync, retrying", self.address)
-            self._schedule(0, "retry")
+        elif since_attempt is None:
+            return
+        elif self._failed:
+            if since_attempt >= retry:
+                _LOGGER.debug("%s still in range after a failed sync, retrying", self.address)
+                self._schedule(0, "retry")
+        elif in_range and since_attempt >= in_range:
+            _LOGGER.debug("%s still in range, periodic sync", self.address)
+            self._schedule(0, "periodic")
 
     def _schedule(self, delay: float, reason: str) -> None:
         @callback

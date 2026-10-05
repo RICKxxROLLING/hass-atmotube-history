@@ -53,6 +53,8 @@ retried (see below) and never lose data, but turning polling off avoids the cont
 - The integration listens for the device's advertisements. When the device **reappears after
   being out of range for at least 10 minutes** (configurable), it waits **30 s** and then syncs.
   The first sighting after Home Assistant starts also counts as a reappearance.
+- While the device stays in range it **syncs every 5 minutes** (configurable, 0 turns it off), so
+  the history sensors stay close to live while the car is parked.
 - If a sync fails, it is **retried every 15 minutes** (configurable) while the device stays in
   range.
 - `atmo_history.sync_now` runs a sync on demand. It takes an optional `config_entry_id`.
@@ -130,6 +132,7 @@ reading the bytes in the other order would give a sensible time, the error says 
 | Absence before a new sync | 10 min | |
 | Delay after the device reappears | 30 s | |
 | Retry interval after a failed sync | 15 min | |
+| Sync every N minutes while in range | 5 min | 0 = only when the device reappears |
 | Seconds between history records | 60 | See the interval check above |
 | I have verified the record interval | off | Only acts at the moment you save the form |
 | Dry run | off | |

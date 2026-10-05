@@ -33,6 +33,17 @@ HISTORY_DEVICE_CLASSES: dict[str, SensorDeviceClass] = {
     "pm10": SensorDeviceClass.PM10,
 }
 
+# Decimals shown in the UI (in whatever unit the entity is displayed in).
+HISTORY_DISPLAY_PRECISION: dict[str, int] = {
+    "temperature": 1,
+    "humidity": 0,
+    "voc": 0,
+    "pressure": 2,
+    "pm1": 0,
+    "pm25": 0,
+    "pm10": 0,
+}
+
 HISTORY_SENSORS = tuple(
     SensorEntityDescription(
         key=f"{metric}_history",
@@ -40,6 +51,7 @@ HISTORY_SENSORS = tuple(
         device_class=device_class,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=METRIC_META[metric][1],
+        suggested_display_precision=HISTORY_DISPLAY_PRECISION[metric],
     )
     for metric, device_class in HISTORY_DEVICE_CLASSES.items()
 )

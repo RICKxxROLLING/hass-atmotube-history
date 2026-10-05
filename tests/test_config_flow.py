@@ -126,6 +126,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
             "absent_minutes": 20,
             "sync_delay": 30,
             "retry_minutes": 5,
+            "in_range_minutes": 10,
             CONF_RECORD_INTERVAL: 300,
             CONF_CONFIRM_INTERVAL: True,
             "dry_run": False,
@@ -134,6 +135,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["absent_minutes"] == 20
+    assert entry.options["in_range_minutes"] == 10
     assert entry.options[CONF_RECORD_INTERVAL] == 300
     assert CONF_CONFIRM_INTERVAL not in entry.options
     manager.async_confirm_interval.assert_awaited_once_with(300)

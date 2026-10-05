@@ -34,12 +34,14 @@
           "influx_url": "InfluxDB URL",
           "influx_token": "InfluxDB token",
           "influx_org": "InfluxDB organization",
-          "influx_bucket": "InfluxDB bucket"
+          "influx_bucket": "InfluxDB bucket",
+          "in_range_minutes": "Sync every N minutes while in range"
         },
         "data_description": {
           "absent_minutes": "The device must have been out of range at least this long for its return to start a sync.",
           "record_interval": "Not documented by Atmotube; 60 s is the community-observed value. It is checked automatically against consecutive history batches.",
-          "confirm_interval": "Tick only after verifying the interval yourself, e.g. when the automatic check was fooled by a recording gap. Batches held for the check are then imported."
+          "confirm_interval": "Tick only after verifying the interval yourself, e.g. when the automatic check was fooled by a recording gap. Batches held for the check are then imported.",
+          "in_range_minutes": "Keeps the history sensors close to live while the car is parked. 0 turns it off. Each sync is a short Bluetooth connection."
         }
       }
     },

@@ -6,20 +6,12 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from bleak.exc import BleakError
 from homeassistant.components import bluetooth
-from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
-from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import (
-    StatisticData,
-    StatisticMeanType,
-    StatisticMetaData,
-)
-from homeassistant.components.recorder.statistics import async_import_statistics
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -81,7 +73,7 @@ from .protocol import (
     ProtocolError,
     TransferAborted,
 )
-from .statistics import METRIC_META, async_import_records
+from .statistics import async_import_records, async_write_complete_hours
 
 if TYPE_CHECKING:
     from .sensor import AtmoHistoryValueSensor
@@ -408,6 +400,11 @@ class AtmoHistoryManager:
                 if outcome is None:
                     outcome, failed, error = RESULT_ERROR, True, f"Import failed: {err}"
 
+        # Hours held back while in progress are written once they have ended,
+        # even when this sync brought no new records.
+        if not dry_run:
+            await self._async_write_complete_hours()
+
         if outcome is None:
             if dry_run:
                 outcome = RESULT_DRY_RUN
@@ -571,7 +568,7 @@ class AtmoHistoryManager:
         if not records:
             return
         aggregator = self._aggregator.copy()
-        added, touched = await async_import_records(
+        added, _written = await async_import_records(
             self.hass, self.address, self.name, aggregator, records, self.interval
         )
         if self._opt(CONF_INFLUX_ENABLED, False):
@@ -583,7 +580,7 @@ class AtmoHistoryManager:
                 self._opt(CONF_INFLUX_BUCKET, ""),
                 influx.to_line_protocol(self.address, records),
             )
-        await self._async_write_entity_history(records, aggregator, touched)
+        await self._async_write_entity_history(records)
         self._aggregator = aggregator
         self._session_imported += added
         _LOGGER.debug(
@@ -594,17 +591,26 @@ class AtmoHistoryManager:
             records[-1].timestamp,
         )
 
-    async def _async_write_entity_history(
-        self,
-        records: list[HistoryRecord],
-        aggregator: HourlyAggregator,
-        touched: set[int],
-    ) -> None:
+    async def _async_write_complete_hours(self) -> None:
+        aggregator = self._aggregator.copy()
+        try:
+            written = await async_write_complete_hours(
+                self.hass, self.address, self.name, aggregator
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Writing hourly statistics for %s failed: %s", self.address, err)
+            return
+        if written:
+            _LOGGER.debug("Wrote %s completed hours to statistics", len(written))
+            self._aggregator = aggregator
+
+    async def _async_write_entity_history(self, records: list[HistoryRecord]) -> None:
         """Give the history sensors the records as their recorded history.
 
-        Each minute record becomes a state row with its original time, and the
-        hourly statistics are attached to the entity as well, so history graphs
-        show minute detail while the recorder keeps it and hourly data after.
+        Each minute record becomes a state row with its original time. The
+        entities' long-term statistics are left to the recorder, which compiles
+        them from these states; importing into the same statistic ids collides
+        with its hourly compile. Hourly history goes to the external statistics.
         """
         rows: dict[str, list[tuple[float, str]]] = {}
         for metric, entity in self.history_entities.items():
@@ -624,32 +630,3 @@ class AtmoHistoryManager:
         if not rows:
             return
         await async_backfill_states(self.hass, rows)
-
-        for metric, entity in self.history_entities.items():
-            if entity.entity_id not in rows:
-                continue
-            hourly = [
-                StatisticData(
-                    start=datetime.fromtimestamp(start, UTC),
-                    mean=entity.convert(stats.mean),
-                    min=entity.convert(stats.min),
-                    max=entity.convert(stats.max),
-                )
-                for start in sorted(touched)
-                if (stats := aggregator.stats(start).get(metric)) is not None
-            ]
-            if hourly:
-                async_import_statistics(
-                    self.hass,
-                    StatisticMetaData(
-                        mean_type=StatisticMeanType.ARITHMETIC,
-                        has_sum=False,
-                        name=None,
-                        source=RECORDER_DOMAIN,
-                        statistic_id=entity.entity_id,
-                        unit_class=METRIC_META[metric][2],
-                        unit_of_measurement=entity.unit_of_measurement,
-                    ),
-                    hourly,
-                )
-        await get_instance(self.hass).async_block_till_done()

@@ -5,8 +5,8 @@ A Home Assistant custom integration that downloads the measurement history store
 imports it with the original timestamps:
 
 - as **history sensors** whose recorded history holds every minute record,
-- as **long-term statistics** (hourly mean/min/max per metric), merged into hours that already
-  have data rather than overwriting them, and
+- as **long-term statistics** (hourly mean/min/max per metric) under the integration's own
+  statistic ids, merged into hours that already have data rather than overwriting them, and
 - optionally as **raw per-record points in InfluxDB v2**.
 
 While the device is in range it syncs every few minutes, so the history sensors stay close to
@@ -150,8 +150,13 @@ history **with its original timestamp**, so the History panel and history graph 
 full minute-by-minute data, including the time the car was away.
 
 - Minute rows are kept as long as the recorder keeps any entity history (`purge_keep_days`, 10
-  days by default). Hourly mean/min/max is also attached to these entities as long-term
-  statistics, so graphs of older periods still show hourly data.
+  days by default).
+- The entities' own long-term statistics are compiled by the recorder from their states, like
+  any other measurement sensor. The integration never writes into them: the recorder fails the
+  whole hourly compile, for every entity, if a row for that hour already exists. For hours the
+  device spent out of range the minute rows arrive after the recorder has compiled the hour, so
+  the entity's long-term statistics only show the last known value there. For accurate hourly
+  history over long periods, chart the **statistics** below instead.
 - Home Assistant has no public API for recording states in the past. The integration inserts
   these rows through a task on the recorder's own queue, the same way the recorder imports
   statistics. A future Home Assistant update could change the database layout and break this
@@ -172,11 +177,37 @@ full minute-by-minute data, including the time the car was away.
 | `atmo_history:<mac>_pressure` | Pa |
 | `atmo_history:<mac>_pm1`, `_pm25`, `_pm10` | µg/m³ |
 
+`<mac>` is the Bluetooth address in lower case without colons, e.g.
+`atmo_history:aabbccddeeff_voc`. It does not change if you rename the device. The full list is
+under *Developer tools → Statistics* (search for `atmo_history`).
+
 The units match ha-atmo's live sensors. External statistics have a unit but no device class,
 because Home Assistant does not store one for them.
 
+An hour is written once it has **ended**: records from the hour in progress are kept and written
+on the first sync after it ends. Writing an hour again (more records for it arrive later) replaces
+its row.
+
 Merging is exact for the last 30 days. When newer data lands in an hour older than that, the
 existing row is weighted as if it covered the rest of the hour.
+
+**Charting the statistics.** Add a *Statistics graph* card and pick the statistics by name
+(e.g. *Atmotube PRO VOC (history)*), or in YAML:
+
+```yaml
+type: statistics-graph
+title: Air quality (Atmotube history)
+period: hour
+stat_types: [mean, min, max]
+chart_type: line
+days_to_show: 30
+entities:
+  - atmo_history:aabbccddeeff_pm25
+  - atmo_history:aabbccddeeff_voc
+```
+
+Use `period: day` or `week` for longer ranges. Statistics with different units get separate
+y-axes, so keep one or two units per card.
 
 **InfluxDB** gets a measurement `atmotube_history`, tagged `device=<MAC>`, with float fields
 `temperature humidity voc pressure pm1 pm25 pm10` at second precision. PM fields are left out

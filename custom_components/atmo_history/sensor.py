@@ -158,10 +158,6 @@ class AtmoHistoryValueSensor(RestoreSensor):
         finally:
             self._attr_native_value = saved
 
-    def convert(self, value: float) -> float:
-        """Convert a native value to the entity's display unit."""
-        return float(self.render_state(value))
-
     def set_latest(self, value: float, timestamp: int) -> None:
         """Show the newest reading as the current state."""
         if timestamp < self._latest_ts:

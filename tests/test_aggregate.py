@@ -70,6 +70,23 @@ def test_roundtrip_and_copy_isolation() -> None:
     assert agg.stats(H)["temperature"].mean == 10
 
 
+def test_dirty_hours_until_written() -> None:
+    agg = HourlyAggregator()
+    agg.add_records([rec(H, 10), rec(H + 3600, 20)])
+    # The hour in progress (H + 3600) is held back.
+    assert agg.dirty_before(H + 3600) == [H]
+    agg.mark_written([H])
+    assert agg.dirty_before(H + 7200) == [H + 3600]
+    # Survives a restart; a resend does not make an hour dirty again.
+    agg = HourlyAggregator.from_dict(agg.as_dict())
+    assert agg.dirty_before(H + 7200) == [H + 3600]
+    agg.mark_written([H + 3600])
+    agg.add_records([rec(H, 10)])
+    assert agg.dirty_before(H + 7200) == []
+    # Stores written before the flag existed load as already written.
+    assert HourlyAggregator.from_dict({str(H): {"o": [0], "m": {}}}).dirty_before(H + 3600) == []
+
+
 def test_prune() -> None:
     agg = HourlyAggregator()
     agg.add_records([rec(H, 1), rec(H + 3600, 2)])

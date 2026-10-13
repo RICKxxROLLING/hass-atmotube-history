@@ -106,6 +106,39 @@ async def _async_seed_old_hours(
             aggregator.seed(start, existing[start], expected - new_per_hour[start])
 
 
+def current_hour() -> int:
+    """Return the start of the hour in progress; only earlier hours are written."""
+    return hour_start(int(dt_util.utcnow().timestamp()))
+
+
+async def async_write_complete_hours(
+    hass: HomeAssistant, address: str, name: str, aggregator: HourlyAggregator
+) -> set[int]:
+    """Write changed hours that have ended to the external statistics.
+
+    Only the integration's own ``atmo_history:`` statistic ids are written,
+    never an entity's: the recorder compiles those itself and fails the whole
+    hourly run if a row for the hour already exists. Writing an hour again
+    replaces its row. Returns the hours written.
+    """
+    hours = aggregator.dirty_before(current_hour())
+    if not hours:
+        return set()
+    per_metric: dict[str, list[StatisticData]] = {m: [] for m in METRICS}
+    for start in hours:
+        start_dt = datetime.fromtimestamp(start, UTC)
+        for metric, stats in aggregator.stats(start).items():
+            per_metric[metric].append(
+                StatisticData(start=start_dt, mean=stats.mean, min=stats.min, max=stats.max)
+            )
+    for metric, rows in per_metric.items():
+        if rows:
+            async_add_external_statistics(hass, metadata(address, name, metric), rows)
+    await get_instance(hass).async_block_till_done()
+    aggregator.mark_written(hours)
+    return set(hours)
+
+
 async def async_import_records(
     hass: HomeAssistant,
     address: str,
@@ -117,25 +150,13 @@ async def async_import_records(
     """Merge records into hourly statistics and wait for the recorder commit.
 
     ``aggregator`` is updated in place; the caller persists it only after
-    everything else has succeeded. Returns the number of new records and the
-    hours (start timestamps) that changed.
+    everything else has succeeded. The hour in progress is held back until it
+    has ended. Returns the number of new records and the hours written.
     """
-    cutoff = hour_start(int(dt_util.utcnow().timestamp())) - TRACKED_HOURS_DAYS * 86400
+    cutoff = current_hour() - TRACKED_HOURS_DAYS * 86400
     await _async_seed_old_hours(hass, address, aggregator, records, interval, cutoff)
 
-    touched, added = aggregator.add_records(records)
-    if touched:
-        per_metric: dict[str, list[StatisticData]] = {m: [] for m in METRICS}
-        for start in sorted(touched):
-            start_dt = datetime.fromtimestamp(start, UTC)
-            for metric, stats in aggregator.stats(start).items():
-                per_metric[metric].append(
-                    StatisticData(start=start_dt, mean=stats.mean, min=stats.min, max=stats.max)
-                )
-        for metric, rows in per_metric.items():
-            if rows:
-                async_add_external_statistics(hass, metadata(address, name, metric), rows)
-        await get_instance(hass).async_block_till_done()
-
+    _touched, added = aggregator.add_records(records)
+    written = await async_write_complete_hours(hass, address, name, aggregator)
     aggregator.prune(cutoff)
-    return added, touched
+    return added, written

@@ -4,6 +4,8 @@ Home Assistant's external statistics replace a whole hour on import, so we
 keep the running count/sum/min/max for recent hours and which record times
 they already contain. Re-importing a batch (e.g. after a lost ACK) is a no-op
 and a batch that continues a partly imported hour extends it correctly.
+Hours changed since they were last written are marked dirty, so an hour that
+is still in progress can be written once it has ended.
 
 No Home Assistant imports.
 """
@@ -50,12 +52,15 @@ class HourBucket:
     offsets: set[int] = field(default_factory=set)
     # metric -> [count, sum, min, max]
     metrics: dict[str, list[float]] = field(default_factory=dict)
+    # Changed since it was last written to statistics
+    dirty: bool = False
 
     def add(self, offset: int, values: Mapping[str, float]) -> bool:
         """Add one record; return False if it was already counted."""
         if offset in self.offsets:
             return False
         self.offsets.add(offset)
+        self.dirty = True
         for key, value in values.items():
             acc = self.metrics.get(key)
             if acc is None:
@@ -77,7 +82,10 @@ class HourBucket:
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize for storage."""
-        return {"o": sorted(self.offsets), "m": self.metrics}
+        data: dict[str, Any] = {"o": sorted(self.offsets), "m": self.metrics}
+        if self.dirty:
+            data["d"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> HourBucket:
@@ -85,6 +93,7 @@ class HourBucket:
         return cls(
             offsets=set(data.get("o", ())),
             metrics={k: list(v) for k, v in data.get("m", {}).items()},
+            dirty=bool(data.get("d", False)),
         )
 
 
@@ -122,6 +131,16 @@ class HourlyAggregator:
                 for key, stats in existing.items()
             }
         )
+
+    def dirty_before(self, before: int) -> list[int]:
+        """Return the changed hours that ended by ``before``, oldest first."""
+        return sorted(s for s, b in self.buckets.items() if b.dirty and s < before)
+
+    def mark_written(self, starts: Iterable[int]) -> None:
+        """Mark hours as written to statistics."""
+        for start in starts:
+            if (bucket := self.buckets.get(start)) is not None:
+                bucket.dirty = False
 
     def stats(self, start: int) -> dict[str, HourStats]:
         """Return statistics for one hour."""

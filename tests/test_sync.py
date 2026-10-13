@@ -20,6 +20,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.recorder.common import (
+    async_wait_recording_done,
+    do_adhoc_statistics,
+)
 
 from custom_components.atmo_history import statistics as statistics_module
 from custom_components.atmo_history.aggregate import hour_start
@@ -463,8 +467,12 @@ async def test_minute_history_written_to_entity(hass: HomeAssistant, ble: Device
     history = await entity_history(hass, entity_id, first - 10)
     assert history[:3] == [(first, "10"), (first + 60, "20"), (first + 120, "30")]
 
-    rows = await hour_stats(hass, entity_id)
-    assert rows == [{"start": T0, "mean": 20.0, "min": 10.0, "max": 30.0}]
+    # Hourly history goes to the external statistic only; the entity's own
+    # statistics are left to the recorder's compile.
+    assert await hour_stats(hass, entity_id) == []
+    assert await hour_stats(hass, STAT_TEMP) == [
+        {"start": T0, "mean": 20.0, "min": 10.0, "max": 30.0}
+    ]
 
 
 async def test_entity_history_not_duplicated_on_retry(
@@ -518,3 +526,66 @@ async def test_small_batches_with_jitter_do_not_stop(
     history = await entity_history(hass, history_entity_id(hass, "temperature"), T0 - 10)
     stamps = [ts for ts, _ in history if ts < T0 + 3600]
     assert stamps == [T0 + 60 * i for i in range(10)]
+
+
+async def compile_hour(hass: HomeAssistant, start: int) -> None:
+    """Run the recorder's own compile for the 5 minutes that close an hour."""
+    do_adhoc_statistics(hass, start=datetime.fromtimestamp(start + 3300, UTC))
+    await async_wait_recording_done(hass)
+
+
+async def test_recorder_compile_and_import_share_no_hour(
+    hass: HomeAssistant, ble: DeviceHolder, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: importing into the entity's statistic id broke the hourly compile.
+
+    The recorder inserts each compiled hour; a row we had already imported for
+    that hour made the insert fail and rolled back the whole run.
+    """
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+    entity_id = history_entity_id(hass, "temperature")
+
+    # Records from the hour's last 5 minutes, as a sync while in range brings.
+    ble.device = FakeAtmotube([simple_batch(T0 + 3300, [10, 20, 30])])
+    await sync(hass, entry)
+    await compile_hour(hass, T0)
+
+    # The compile succeeded and wrote its own row: time-weighted over
+    # 10 for 60 s, 20 for 60 s and 30 for 180 s.
+    compiled = [{"start": T0, "mean": 24.0, "min": 10.0, "max": 30.0}]
+    assert await hour_stats(hass, entity_id) == compiled
+
+    # Importing more of the already compiled hour goes to the external
+    # statistic, replaces its row, and leaves the compiled row alone.
+    ble.device = FakeAtmotube([simple_batch(T0 + 3480, [40, 50])])
+    manager = await sync(hass, entry)
+    await async_wait_recording_done(hass)
+
+    assert manager.status.last_result == "success"
+    assert await hour_stats(hass, entity_id) == compiled
+    assert await hour_stats(hass, STAT_TEMP) == [
+        {"start": T0, "mean": 30.0, "min": 10.0, "max": 50.0}
+    ]
+    assert "UNIQUE constraint failed" not in caplog.text
+    assert "duplicated statistic" not in caplog.text
+
+
+async def test_hour_in_progress_written_once_ended(hass: HomeAssistant, ble: DeviceHolder) -> None:
+    entry = await setup_entry(hass)
+    await entry.runtime_data.async_confirm_interval(60)
+
+    with patch.object(statistics_module, "current_hour", return_value=T0):
+        ble.device = FakeAtmotube([simple_batch(T0 + 600, [10, 20])])
+        manager = await sync(hass, entry)
+    assert manager.status.last_result == "success"
+    assert await hour_stats(hass, STAT_TEMP) == []
+
+    # A later sync with nothing new still writes the hour once it has ended.
+    with patch.object(statistics_module, "current_hour", return_value=T0 + 3600):
+        ble.device = FakeAtmotube([])
+        manager = await sync(hass, entry)
+    assert manager.status.last_result == "no_data"
+    assert await hour_stats(hass, STAT_TEMP) == [
+        {"start": T0, "mean": 15.0, "min": 10.0, "max": 20.0}
+    ]
